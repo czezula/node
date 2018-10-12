@@ -18,44 +18,26 @@ namespace internal {
 
 typedef uint32_t Instr;
 
-// The following macros initialize a float/double variable with a bit pattern
-// without using static initializers: If ARM64_DEFINE_FP_STATICS is defined, the
-// symbol is defined as uint32_t/uint64_t initialized with the desired bit
-// pattern. Otherwise, the same symbol is declared as an external float/double.
-#if defined(ARM64_DEFINE_FP_STATICS)
-#define DEFINE_FLOAT16(name, value) extern const uint16_t name = value
-#define DEFINE_FLOAT(name, value) extern const uint32_t name = value
-#define DEFINE_DOUBLE(name, value) extern const uint64_t name = value
-#else
-#define DEFINE_FLOAT16(name, value) extern const float16 name
-#define DEFINE_FLOAT(name, value) extern const float name
-#define DEFINE_DOUBLE(name, value) extern const double name
-#endif  // defined(ARM64_DEFINE_FP_STATICS)
-
-DEFINE_FLOAT16(kFP16PositiveInfinity, 0x7c00);
-DEFINE_FLOAT16(kFP16NegativeInfinity, 0xfc00);
-DEFINE_FLOAT(kFP32PositiveInfinity, 0x7f800000);
-DEFINE_FLOAT(kFP32NegativeInfinity, 0xff800000);
-DEFINE_DOUBLE(kFP64PositiveInfinity, 0x7ff0000000000000UL);
-DEFINE_DOUBLE(kFP64NegativeInfinity, 0xfff0000000000000UL);
+extern const float16 kFP16PositiveInfinity;
+extern const float16 kFP16NegativeInfinity;
+extern const float kFP32PositiveInfinity;
+extern const float kFP32NegativeInfinity;
+extern const double kFP64PositiveInfinity;
+extern const double kFP64NegativeInfinity;
 
 // This value is a signalling NaN as both a double and as a float (taking the
 // least-significant word).
-DEFINE_DOUBLE(kFP64SignallingNaN, 0x7ff000007f800001);
-DEFINE_FLOAT(kFP32SignallingNaN, 0x7f800001);
+extern const double kFP64SignallingNaN;
+extern const float kFP32SignallingNaN;
 
 // A similar value, but as a quiet NaN.
-DEFINE_DOUBLE(kFP64QuietNaN, 0x7ff800007fc00001);
-DEFINE_FLOAT(kFP32QuietNaN, 0x7fc00001);
+extern const double kFP64QuietNaN;
+extern const float kFP32QuietNaN;
 
 // The default NaN values (for FPCR.DN=1).
-DEFINE_DOUBLE(kFP64DefaultNaN, 0x7ff8000000000000UL);
-DEFINE_FLOAT(kFP32DefaultNaN, 0x7fc00000);
-DEFINE_FLOAT16(kFP16DefaultNaN, 0x7e00);
-
-#undef DEFINE_FLOAT16
-#undef DEFINE_FLOAT
-#undef DEFINE_DOUBLE
+extern const double kFP64DefaultNaN;
+extern const float kFP32DefaultNaN;
+extern const float16 kFP16DefaultNaN;
 
 unsigned CalcLSDataSize(LoadStoreOp op);
 unsigned CalcLSPairDataSize(LoadStorePairOp op);
@@ -122,11 +104,11 @@ class Instruction {
   }
 
   V8_INLINE const Instruction* following(int count = 1) const {
-    return InstructionAtOffset(count * static_cast<int>(kInstructionSize));
+    return InstructionAtOffset(count * static_cast<int>(kInstrSize));
   }
 
   V8_INLINE Instruction* following(int count = 1) {
-    return InstructionAtOffset(count * static_cast<int>(kInstructionSize));
+    return InstructionAtOffset(count * static_cast<int>(kInstrSize));
   }
 
   V8_INLINE const Instruction* preceding(int count = 1) const {
@@ -276,7 +258,7 @@ class Instruction {
   // Indicate whether Rd can be the stack pointer or the zero register. This
   // does not check that the instruction actually has an Rd field.
   Reg31Mode RdMode() const {
-    // The following instructions use csp or wsp as Rd:
+    // The following instructions use sp or wsp as Rd:
     //  Add/sub (immediate) when not setting the flags.
     //  Add/sub (extended) when not setting the flags.
     //  Logical (immediate) when not setting the flags.
@@ -290,7 +272,7 @@ class Instruction {
     }
     if (IsLogicalImmediate()) {
       // Of the logical (immediate) instructions, only ANDS (and its aliases)
-      // can set the flags. The others can all write into csp.
+      // can set the flags. The others can all write into sp.
       // Note that some logical operations are not available to
       // immediate-operand instructions, so we have to combine two masks here.
       if (Mask(LogicalImmediateMask & LogicalOpMask) == ANDS) {
@@ -305,7 +287,7 @@ class Instruction {
   // Indicate whether Rn can be the stack pointer or the zero register. This
   // does not check that the instruction actually has an Rn field.
   Reg31Mode RnMode() const {
-    // The following instructions use csp or wsp as Rn:
+    // The following instructions use sp or wsp as Rn:
     //  All loads and stores.
     //  Add/sub (immediate).
     //  Add/sub (extended).
@@ -347,9 +329,8 @@ class Instruction {
 
   // The range of the branch instruction, expressed as 'instr +- range'.
   static int32_t ImmBranchRange(ImmBranchType branch_type) {
-    return
-      (1 << (ImmBranchRangeBitwidth(branch_type) + kInstructionSizeLog2)) / 2 -
-      kInstructionSize;
+    return (1 << (ImmBranchRangeBitwidth(branch_type) + kInstrSizeLog2)) / 2 -
+           kInstrSize;
   }
 
   int ImmBranch() const {
@@ -371,6 +352,12 @@ class Instruction {
     int32_t low16 = following()->ImmException();
     return (high16 << 16) | low16;
   }
+
+  bool IsUnconditionalBranch() const {
+    return Mask(UnconditionalBranchMask) == B;
+  }
+
+  bool IsBranchAndLink() const { return Mask(UnconditionalBranchMask) == BL; }
 
   bool IsBranchAndLinkToRegister() const {
     return Mask(UnconditionalBranchToRegisterMask) == BLR;
@@ -414,9 +401,9 @@ class Instruction {
   bool IsTargetInImmPCOffsetRange(Instruction* target);
   // Patch a PC-relative offset to refer to 'target'. 'this' may be a branch or
   // a PC-relative addressing instruction.
-  void SetImmPCOffsetTarget(AssemblerBase::IsolateData isolate_data,
+  void SetImmPCOffsetTarget(const AssemblerOptions& options,
                             Instruction* target);
-  void SetUnresolvedInternalReferenceImmTarget(AssemblerBase::IsolateData,
+  void SetUnresolvedInternalReferenceImmTarget(const AssemblerOptions& options,
                                                Instruction* target);
   // Patch a literal load instruction to load from 'source'.
   void SetImmLLiteral(Instruction* source);
@@ -431,14 +418,14 @@ class Instruction {
   V8_INLINE const Instruction* InstructionAtOffset(
       int64_t offset, CheckAlignment check = CHECK_ALIGNMENT) const {
     // The FUZZ_disasm test relies on no check being done.
-    DCHECK(check == NO_CHECK || IsAligned(offset, kInstructionSize));
+    DCHECK(check == NO_CHECK || IsAligned(offset, kInstrSize));
     return this + offset;
   }
 
   V8_INLINE Instruction* InstructionAtOffset(
       int64_t offset, CheckAlignment check = CHECK_ALIGNMENT) {
     // The FUZZ_disasm test relies on no check being done.
-    DCHECK(check == NO_CHECK || IsAligned(offset, kInstructionSize));
+    DCHECK(check == NO_CHECK || IsAligned(offset, kInstrSize));
     return this + offset;
   }
 
@@ -453,8 +440,7 @@ class Instruction {
 
   static const int ImmPCRelRangeBitwidth = 21;
   static bool IsValidPCRelOffset(ptrdiff_t offset) { return is_int21(offset); }
-  void SetPCRelImmTarget(AssemblerBase::IsolateData isolate_data,
-                         Instruction* target);
+  void SetPCRelImmTarget(const AssemblerOptions& options, Instruction* target);
   void SetBranchImmTarget(Instruction* target);
 };
 
@@ -547,9 +533,9 @@ const Instr kImmExceptionIsPrintf = 0xdeb1;
 // passed in. This information could be retrieved from the printf format string,
 // but the format string is not trivial to parse so we encode the relevant
 // information with the HLT instruction.
-const unsigned kPrintfArgCountOffset = 1 * kInstructionSize;
-const unsigned kPrintfArgPatternListOffset = 2 * kInstructionSize;
-const unsigned kPrintfLength = 3 * kInstructionSize;
+const unsigned kPrintfArgCountOffset = 1 * kInstrSize;
+const unsigned kPrintfArgPatternListOffset = 2 * kInstrSize;
+const unsigned kPrintfLength = 3 * kInstrSize;
 
 const unsigned kPrintfMaxArgCount = 4;
 
@@ -569,13 +555,13 @@ const Instr kImmExceptionIsDebug = 0xdeb0;
 // Parameters are inlined in the code after a debug pseudo-instruction:
 // - Debug code.
 // - Debug parameters.
-// - Debug message string. This is a NULL-terminated ASCII string, padded to
-//   kInstructionSize so that subsequent instructions are correctly aligned.
+// - Debug message string. This is a nullptr-terminated ASCII string, padded to
+//   kInstrSize so that subsequent instructions are correctly aligned.
 // - A kImmExceptionIsUnreachable marker, to catch accidental execution of the
 //   string data.
-const unsigned kDebugCodeOffset = 1 * kInstructionSize;
-const unsigned kDebugParamsOffset = 2 * kInstructionSize;
-const unsigned kDebugMessageOffset = 3 * kInstructionSize;
+const unsigned kDebugCodeOffset = 1 * kInstrSize;
+const unsigned kDebugParamsOffset = 2 * kInstrSize;
+const unsigned kDebugMessageOffset = 3 * kInstrSize;
 
 // Debug parameters.
 // Used without a TRACE_ option, the Debugger will print the arguments only
@@ -660,8 +646,8 @@ class NEONFormatDecoder {
 
   // Set the format mapping for all or individual substitutions.
   void SetFormatMaps(const NEONFormatMap* format0,
-                     const NEONFormatMap* format1 = NULL,
-                     const NEONFormatMap* format2 = NULL);
+                     const NEONFormatMap* format1 = nullptr,
+                     const NEONFormatMap* format2 = nullptr);
   void SetFormatMap(unsigned index, const NEONFormatMap* format);
 
   // Substitute %s in the input string with the placeholder string for each

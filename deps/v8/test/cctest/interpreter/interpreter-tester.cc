@@ -4,6 +4,7 @@
 
 #include "test/cctest/interpreter/interpreter-tester.h"
 
+#include "src/api-inl.h"
 #include "src/objects-inl.h"
 
 namespace v8 {
@@ -23,7 +24,6 @@ InterpreterTester::InterpreterTester(
       source_(source),
       bytecode_(bytecode),
       feedback_metadata_(feedback_metadata) {
-  i::FLAG_stress_fullcodegen = false;
   i::FLAG_always_opt = false;
 }
 
@@ -68,6 +68,8 @@ std::string InterpreterTester::SourceForBody(const char* body) {
 std::string InterpreterTester::function_name() {
   return std::string(kFunctionName);
 }
+
+const char InterpreterTester::kFunctionName[] = "f";
 
 }  // namespace interpreter
 }  // namespace internal

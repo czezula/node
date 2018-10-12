@@ -5,10 +5,11 @@
 #include "test/unittests/test-utils.h"
 
 #include "include/libplatform/libplatform.h"
+#include "include/v8.h"
+#include "src/api-inl.h"
 #include "src/base/platform/time.h"
 #include "src/flags.h"
 #include "src/isolate.h"
-#include "src/list-inl.h"
 #include "src/objects-inl.h"
 #include "src/v8.h"
 
@@ -31,6 +32,8 @@ TestWithIsolate::~TestWithIsolate() {}
 void TestWithIsolate::SetUpTestCase() {
   Test::SetUpTestCase();
   EXPECT_EQ(NULL, isolate_);
+  // Make BigInt64Array / BigUint64Array available for testing.
+  i::FLAG_harmony_bigint = true;
   v8::Isolate::CreateParams create_params;
   array_buffer_allocator_ = v8::ArrayBuffer::Allocator::NewDefaultAllocator();
   create_params.array_buffer_allocator = array_buffer_allocator_;
@@ -51,31 +54,34 @@ void TestWithIsolate::TearDownTestCase() {
   Test::TearDownTestCase();
 }
 
+Local<Value> TestWithIsolate::RunJS(const char* source) {
+  Local<Script> script =
+      v8::Script::Compile(
+          isolate()->GetCurrentContext(),
+          v8::String::NewFromUtf8(isolate(), source, v8::NewStringType::kNormal)
+              .ToLocalChecked())
+          .ToLocalChecked();
+  return script->Run(isolate()->GetCurrentContext()).ToLocalChecked();
+}
 
 TestWithContext::TestWithContext()
     : context_(Context::New(isolate())), context_scope_(context_) {}
 
-
 TestWithContext::~TestWithContext() {}
 
-
-namespace base {
-namespace {
-
-inline int64_t GetRandomSeedFromFlag(int random_seed) {
-  return random_seed ? random_seed : TimeTicks::Now().ToInternalValue();
+v8::Local<v8::String> TestWithContext::NewString(const char* string) {
+  return v8::String::NewFromUtf8(v8_isolate(), string,
+                                 v8::NewStringType::kNormal)
+      .ToLocalChecked();
 }
 
-}  // namespace
-
-TestWithRandomNumberGenerator::TestWithRandomNumberGenerator()
-    : rng_(GetRandomSeedFromFlag(::v8::internal::FLAG_random_seed)) {}
-
-
-TestWithRandomNumberGenerator::~TestWithRandomNumberGenerator() {}
-
-}  // namespace base
-
+void TestWithContext::SetGlobalProperty(const char* name,
+                                        v8::Local<v8::Value> value) {
+  CHECK(v8_context()
+            ->Global()
+            ->Set(v8_context(), NewString(name), value)
+            .FromJust());
+}
 
 namespace internal {
 
@@ -84,6 +90,10 @@ TestWithIsolate::~TestWithIsolate() {}
 TestWithIsolateAndZone::~TestWithIsolateAndZone() {}
 
 Factory* TestWithIsolate::factory() const { return isolate()->factory(); }
+
+Handle<Object> TestWithIsolate::RunJSInternal(const char* source) {
+  return Utils::OpenHandle(*::v8::TestWithIsolate::RunJS(source));
+}
 
 base::RandomNumberGenerator* TestWithIsolate::random_number_generator() const {
   return isolate()->random_number_generator();
@@ -101,9 +111,9 @@ SaveFlags::SaveFlags() { non_default_flags_ = FlagList::argv(); }
 
 SaveFlags::~SaveFlags() {
   FlagList::ResetAllFlags();
-  int argc = non_default_flags_->length();
+  int argc = static_cast<int>(non_default_flags_->size());
   FlagList::SetFlagsFromCommandLine(
-      &argc, const_cast<char**>(non_default_flags_->begin()),
+      &argc, const_cast<char**>(non_default_flags_->data()),
       false /* remove_flags */);
   for (auto flag = non_default_flags_->begin();
        flag != non_default_flags_->end(); ++flag) {

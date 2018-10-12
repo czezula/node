@@ -7,10 +7,11 @@
 #include "include/v8-platform.h"
 #include "include/v8.h"
 #include "src/base/platform/time.h"
+#include "src/base/template-utils.h"
 #include "src/cancelable-task.h"
-#include "src/compilation-info.h"
 #include "src/compiler-dispatcher/compiler-dispatcher-job.h"
 #include "src/compiler-dispatcher/compiler-dispatcher-tracer.h"
+#include "src/compiler-dispatcher/unoptimized-compile-job.h"
 #include "src/flags.h"
 #include "src/objects-inl.h"
 
@@ -26,16 +27,23 @@ bool DoNextStepOnMainThread(Isolate* isolate, CompilerDispatcherJob* job,
   DCHECK(ThreadId::Current().Equals(isolate->thread_id()));
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                "V8.CompilerDispatcherForgroundStep");
-
-  // Ensure we are in the correct context for the job.
-  SaveContext save(isolate);
-  if (job->has_context()) {
-    isolate->set_context(job->context());
-  } else {
-    DCHECK(job->CanStepNextOnAnyThread());
+  switch (job->status()) {
+    case CompilerDispatcherJob::Status::kInitial:
+      job->PrepareOnMainThread(isolate);
+      break;
+    case CompilerDispatcherJob::Status::kPrepared:
+      job->Compile(false);
+      break;
+    case CompilerDispatcherJob::Status::kCompiled:
+      job->FinalizeOnMainThread(isolate);
+      break;
+    case CompilerDispatcherJob::Status::kHasErrorsToReport:
+      job->ReportErrorsOnMainThread(isolate);
+      break;
+    case CompilerDispatcherJob::Status::kFailed:
+    case CompilerDispatcherJob::Status::kDone:
+      UNREACHABLE();
   }
-
-  job->StepNextOnMainThread();
 
   DCHECK_EQ(job->IsFailed(), isolate->has_pending_exception());
   if (job->IsFailed() && exception_handling == ExceptionHandling::kSwallow) {
@@ -45,10 +53,16 @@ bool DoNextStepOnMainThread(Isolate* isolate, CompilerDispatcherJob* job,
 }
 
 void DoNextStepOnBackgroundThread(CompilerDispatcherJob* job) {
-  DCHECK(job->CanStepNextOnAnyThread());
+  DCHECK(job->NextStepCanRunOnAnyThread());
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                "V8.CompilerDispatcherBackgroundStep");
-  job->StepNextOnBackgroundThread();
+  switch (job->status()) {
+    case CompilerDispatcherJob::Status::kPrepared:
+      job->Compile(true);
+      break;
+    default:
+      UNREACHABLE();
+  }
 }
 
 // Theoretically we get 50ms of idle time max, however it's unlikely that
@@ -57,7 +71,7 @@ const double kMaxIdleTimeToExpectInMs = 40;
 
 class MemoryPressureTask : public CancelableTask {
  public:
-  MemoryPressureTask(Isolate* isolate, CancelableTaskManager* task_manager,
+  MemoryPressureTask(CancelableTaskManager* task_manager,
                      CompilerDispatcher* dispatcher);
   ~MemoryPressureTask() override;
 
@@ -70,22 +84,21 @@ class MemoryPressureTask : public CancelableTask {
   DISALLOW_COPY_AND_ASSIGN(MemoryPressureTask);
 };
 
-MemoryPressureTask::MemoryPressureTask(Isolate* isolate,
-                                       CancelableTaskManager* task_manager,
+MemoryPressureTask::MemoryPressureTask(CancelableTaskManager* task_manager,
                                        CompilerDispatcher* dispatcher)
     : CancelableTask(task_manager), dispatcher_(dispatcher) {}
 
 MemoryPressureTask::~MemoryPressureTask() {}
 
 void MemoryPressureTask::RunInternal() {
-  dispatcher_->AbortAll(CompilerDispatcher::BlockingBehavior::kDontBlock);
+  dispatcher_->AbortAll(BlockingBehavior::kDontBlock);
 }
 
 }  // namespace
 
 class CompilerDispatcher::AbortTask : public CancelableTask {
  public:
-  AbortTask(Isolate* isolate, CancelableTaskManager* task_manager,
+  AbortTask(CancelableTaskManager* task_manager,
             CompilerDispatcher* dispatcher);
   ~AbortTask() override;
 
@@ -98,8 +111,7 @@ class CompilerDispatcher::AbortTask : public CancelableTask {
   DISALLOW_COPY_AND_ASSIGN(AbortTask);
 };
 
-CompilerDispatcher::AbortTask::AbortTask(Isolate* isolate,
-                                         CancelableTaskManager* task_manager,
+CompilerDispatcher::AbortTask::AbortTask(CancelableTaskManager* task_manager,
                                          CompilerDispatcher* dispatcher)
     : CancelableTask(task_manager), dispatcher_(dispatcher) {}
 
@@ -109,11 +121,11 @@ void CompilerDispatcher::AbortTask::RunInternal() {
   dispatcher_->AbortInactiveJobs();
 }
 
-class CompilerDispatcher::BackgroundTask : public CancelableTask {
+class CompilerDispatcher::WorkerTask : public CancelableTask {
  public:
-  BackgroundTask(Isolate* isolate, CancelableTaskManager* task_manager,
-                 CompilerDispatcher* dispatcher);
-  ~BackgroundTask() override;
+  WorkerTask(CancelableTaskManager* task_manager,
+             CompilerDispatcher* dispatcher);
+  ~WorkerTask() override;
 
   // CancelableTask implementation.
   void RunInternal() override;
@@ -121,24 +133,22 @@ class CompilerDispatcher::BackgroundTask : public CancelableTask {
  private:
   CompilerDispatcher* dispatcher_;
 
-  DISALLOW_COPY_AND_ASSIGN(BackgroundTask);
+  DISALLOW_COPY_AND_ASSIGN(WorkerTask);
 };
 
-CompilerDispatcher::BackgroundTask::BackgroundTask(
-    Isolate* isolate, CancelableTaskManager* task_manager,
-    CompilerDispatcher* dispatcher)
+CompilerDispatcher::WorkerTask::WorkerTask(CancelableTaskManager* task_manager,
+                                           CompilerDispatcher* dispatcher)
     : CancelableTask(task_manager), dispatcher_(dispatcher) {}
 
-CompilerDispatcher::BackgroundTask::~BackgroundTask() {}
+CompilerDispatcher::WorkerTask::~WorkerTask() {}
 
-void CompilerDispatcher::BackgroundTask::RunInternal() {
+void CompilerDispatcher::WorkerTask::RunInternal() {
   dispatcher_->DoBackgroundWork();
 }
 
 class CompilerDispatcher::IdleTask : public CancelableIdleTask {
  public:
-  IdleTask(Isolate* isolate, CancelableTaskManager* task_manager,
-           CompilerDispatcher* dispatcher);
+  IdleTask(CancelableTaskManager* task_manager, CompilerDispatcher* dispatcher);
   ~IdleTask() override;
 
   // CancelableIdleTask implementation.
@@ -150,8 +160,7 @@ class CompilerDispatcher::IdleTask : public CancelableIdleTask {
   DISALLOW_COPY_AND_ASSIGN(IdleTask);
 };
 
-CompilerDispatcher::IdleTask::IdleTask(Isolate* isolate,
-                                       CancelableTaskManager* task_manager,
+CompilerDispatcher::IdleTask::IdleTask(CancelableTaskManager* task_manager,
                                        CompilerDispatcher* dispatcher)
     : CancelableIdleTask(task_manager), dispatcher_(dispatcher) {}
 
@@ -170,11 +179,11 @@ CompilerDispatcher::CompilerDispatcher(Isolate* isolate, Platform* platform,
       tracer_(new CompilerDispatcherTracer(isolate_)),
       task_manager_(new CancelableTaskManager()),
       next_job_id_(0),
-      shared_to_job_id_(isolate->heap()),
+      shared_to_unoptimized_job_id_(isolate->heap()),
       memory_pressure_level_(MemoryPressureLevel::kNone),
       abort_(false),
       idle_task_scheduled_(false),
-      num_background_tasks_(0),
+      num_worker_tasks_(0),
       main_thread_blocking_on_job_(nullptr),
       block_for_testing_(false),
       semaphore_for_testing_(0) {
@@ -205,14 +214,12 @@ bool CompilerDispatcher::CanEnqueue() {
 }
 
 bool CompilerDispatcher::CanEnqueue(Handle<SharedFunctionInfo> function) {
-  DCHECK_IMPLIES(IsEnabled(), !FLAG_stress_fullcodegen);
-
   if (!CanEnqueue()) return false;
 
-  // We only handle functions (no eval / top-level code / wasm) that are
+  // We only handle functions (no eval / top-level code / native) that are
   // attached to a script.
   if (!function->script()->IsScript() || function->is_toplevel() ||
-      function->asm_function() || function->native()) {
+      function->native()) {
     return false;
   }
 
@@ -222,14 +229,7 @@ bool CompilerDispatcher::CanEnqueue(Handle<SharedFunctionInfo> function) {
 CompilerDispatcher::JobId CompilerDispatcher::Enqueue(
     std::unique_ptr<CompilerDispatcherJob> job) {
   DCHECK(!job->IsFinished());
-  bool added;
-  JobMap::const_iterator it;
-  std::tie(it, added) =
-      jobs_.insert(std::make_pair(next_job_id_++, std::move(job)));
-  DCHECK(added);
-  if (!it->second->shared().is_null()) {
-    shared_to_job_id_.Set(it->second->shared(), it->first);
-  }
+  JobMap::const_iterator it = InsertJob(std::move(job));
   ConsiderJobForBackgroundProcessing(it->second.get());
   ScheduleIdleTaskIfNeeded();
   return it->first;
@@ -238,18 +238,10 @@ CompilerDispatcher::JobId CompilerDispatcher::Enqueue(
 CompilerDispatcher::JobId CompilerDispatcher::EnqueueAndStep(
     std::unique_ptr<CompilerDispatcherJob> job) {
   DCHECK(!job->IsFinished());
-  bool added;
-  JobMap::const_iterator it;
-  std::tie(it, added) =
-      jobs_.insert(std::make_pair(next_job_id_++, std::move(job)));
-  DCHECK(added);
-  if (!it->second->shared().is_null()) {
-    shared_to_job_id_.Set(it->second->shared(), it->first);
-  }
-  JobId id = it->first;
+  JobMap::const_iterator it = InsertJob(std::move(job));
   if (trace_compiler_dispatcher_) {
     PrintF("CompilerDispatcher: stepping ");
-    it->second->ShortPrint();
+    it->second->ShortPrintOnMainThread();
     PrintF("\n");
   }
   DoNextStepOnMainThread(isolate_, it->second.get(),
@@ -257,7 +249,7 @@ CompilerDispatcher::JobId CompilerDispatcher::EnqueueAndStep(
   ConsiderJobForBackgroundProcessing(it->second.get());
   RemoveIfFinished(it);
   ScheduleIdleTaskIfNeeded();
-  return id;
+  return it->first;
 }
 
 bool CompilerDispatcher::Enqueue(Handle<SharedFunctionInfo> function) {
@@ -272,37 +264,9 @@ bool CompilerDispatcher::Enqueue(Handle<SharedFunctionInfo> function) {
     PrintF(" for parse and compile\n");
   }
 
-  std::unique_ptr<CompilerDispatcherJob> job(new CompilerDispatcherJob(
+  std::unique_ptr<CompilerDispatcherJob> job(new UnoptimizedCompileJob(
       isolate_, tracer_.get(), function, max_stack_size_));
   Enqueue(std::move(job));
-  return true;
-}
-
-bool CompilerDispatcher::Enqueue(Handle<String> source, int start_position,
-                                 int end_position, LanguageMode language_mode,
-                                 int function_literal_id, bool native,
-                                 bool module, bool is_named_expression,
-                                 int compiler_hints,
-                                 CompileJobFinishCallback* finish_callback,
-                                 JobId* job_id) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
-               "V8.CompilerDispatcherEnqueue");
-  if (!CanEnqueue()) return false;
-
-  if (trace_compiler_dispatcher_) {
-    PrintF("CompilerDispatcher: enqueuing function at %d for initial parse\n",
-           start_position);
-  }
-
-  std::unique_ptr<CompilerDispatcherJob> job(new CompilerDispatcherJob(
-      tracer_.get(), max_stack_size_, source, start_position, end_position,
-      language_mode, function_literal_id, native, module, is_named_expression,
-      isolate_->heap()->HashSeed(), isolate_->allocator(), compiler_hints,
-      isolate_->ast_string_constants(), finish_callback));
-  JobId id = Enqueue(std::move(job));
-  if (job_id != nullptr) {
-    *job_id = id;
-  }
   return true;
 }
 
@@ -318,54 +282,8 @@ bool CompilerDispatcher::EnqueueAndStep(Handle<SharedFunctionInfo> function) {
     PrintF(" for parse and compile\n");
   }
 
-  std::unique_ptr<CompilerDispatcherJob> job(new CompilerDispatcherJob(
+  std::unique_ptr<CompilerDispatcherJob> job(new UnoptimizedCompileJob(
       isolate_, tracer_.get(), function, max_stack_size_));
-  EnqueueAndStep(std::move(job));
-  return true;
-}
-
-bool CompilerDispatcher::Enqueue(
-    Handle<Script> script, Handle<SharedFunctionInfo> function,
-    FunctionLiteral* literal, std::shared_ptr<Zone> parse_zone,
-    std::shared_ptr<DeferredHandles> parse_handles,
-    std::shared_ptr<DeferredHandles> compile_handles) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
-               "V8.CompilerDispatcherEnqueue");
-  if (!CanEnqueue(function)) return false;
-  if (IsEnqueued(function)) return true;
-
-  if (trace_compiler_dispatcher_) {
-    PrintF("CompilerDispatcher: enqueuing ");
-    function->ShortPrint();
-    PrintF(" for compile\n");
-  }
-
-  std::unique_ptr<CompilerDispatcherJob> job(new CompilerDispatcherJob(
-      isolate_, tracer_.get(), script, function, literal, parse_zone,
-      parse_handles, compile_handles, max_stack_size_));
-  Enqueue(std::move(job));
-  return true;
-}
-
-bool CompilerDispatcher::EnqueueAndStep(
-    Handle<Script> script, Handle<SharedFunctionInfo> function,
-    FunctionLiteral* literal, std::shared_ptr<Zone> parse_zone,
-    std::shared_ptr<DeferredHandles> parse_handles,
-    std::shared_ptr<DeferredHandles> compile_handles) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
-               "V8.CompilerDispatcherEnqueueAndStep");
-  if (!CanEnqueue(function)) return false;
-  if (IsEnqueued(function)) return true;
-
-  if (trace_compiler_dispatcher_) {
-    PrintF("CompilerDispatcher: enqueuing ");
-    function->ShortPrint();
-    PrintF(" for compile\n");
-  }
-
-  std::unique_ptr<CompilerDispatcherJob> job(new CompilerDispatcherJob(
-      isolate_, tracer_.get(), script, function, literal, parse_zone,
-      parse_handles, compile_handles, max_stack_size_));
   EnqueueAndStep(std::move(job));
   return true;
 }
@@ -382,7 +300,7 @@ void CompilerDispatcher::WaitForJobIfRunningOnBackground(
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                "V8.CompilerDispatcherWaitForBackgroundJob");
   RuntimeCallTimerScope runtimeTimer(
-      isolate_, &RuntimeCallStats::CompileWaitForDispatcher);
+      isolate_, RuntimeCallCounterId::kCompileWaitForDispatcher);
 
   base::LockGuard<base::Mutex> lock(&mutex_);
   if (running_background_jobs_.find(job) == running_background_jobs_.end()) {
@@ -401,7 +319,7 @@ void CompilerDispatcher::WaitForJobIfRunningOnBackground(
 bool CompilerDispatcher::FinishNow(CompilerDispatcherJob* job) {
   if (trace_compiler_dispatcher_) {
     PrintF("CompilerDispatcher: finishing ");
-    job->ShortPrint();
+    job->ShortPrintOnMainThread();
     PrintF(" now\n");
   }
   WaitForJobIfRunningOnBackground(job);
@@ -456,13 +374,13 @@ void CompilerDispatcher::AbortAll(BlockingBehavior blocking) {
       WaitForJobIfRunningOnBackground(it.second.get());
       if (trace_compiler_dispatcher_) {
         PrintF("CompilerDispatcher: aborted ");
-        it.second->ShortPrint();
+        it.second->ShortPrintOnMainThread();
         PrintF("\n");
       }
-      it.second->ResetOnMainThread();
+      it.second->ResetOnMainThread(isolate_);
     }
     jobs_.clear();
-    shared_to_job_id_.Clear();
+    shared_to_unoptimized_job_id_.Clear();
     {
       base::LockGuard<base::Mutex> lock(&mutex_);
       DCHECK(pending_background_jobs_.empty());
@@ -504,14 +422,14 @@ void CompilerDispatcher::AbortInactiveJobs() {
     }
     if (trace_compiler_dispatcher_) {
       PrintF("CompilerDispatcher: aborted ");
-      job->second->ShortPrint();
+      job->second->ShortPrintOnMainThread();
       PrintF("\n");
     }
     it = RemoveJob(job);
   }
   if (jobs_.empty()) {
     base::LockGuard<base::Mutex> lock(&mutex_);
-    if (num_background_tasks_ == 0) abort_ = false;
+    if (num_worker_tasks_ == 0) abort_ = false;
   }
 }
 
@@ -542,17 +460,18 @@ void CompilerDispatcher::MemoryPressureNotification(
     }
     platform_->CallOnForegroundThread(
         reinterpret_cast<v8::Isolate*>(isolate_),
-        new MemoryPressureTask(isolate_, task_manager_.get(), this));
+        new MemoryPressureTask(task_manager_.get(), this));
   }
 }
 
 CompilerDispatcher::JobMap::const_iterator CompilerDispatcher::GetJobFor(
     Handle<SharedFunctionInfo> shared) const {
-  JobId* job_id_ptr = shared_to_job_id_.Find(shared);
+  JobId* job_id_ptr = shared_to_unoptimized_job_id_.Find(shared);
   JobMap::const_iterator job = jobs_.end();
   if (job_id_ptr) {
     job = jobs_.find(*job_id_ptr);
-    DCHECK(job == jobs_.end() || job->second->IsAssociatedWith(shared));
+    DCHECK(job == jobs_.end() ||
+           job->second->AsUnoptimizedCompileJob()->IsAssociatedWith(shared));
   }
   return job;
 }
@@ -566,7 +485,7 @@ void CompilerDispatcher::ScheduleIdleTaskFromAnyThread() {
     idle_task_scheduled_ = true;
   }
   platform_->CallIdleOnForegroundThread(
-      v8_isolate, new IdleTask(isolate_, task_manager_.get(), this));
+      v8_isolate, new IdleTask(task_manager_.get(), this));
 }
 
 void CompilerDispatcher::ScheduleIdleTaskIfNeeded() {
@@ -576,35 +495,33 @@ void CompilerDispatcher::ScheduleIdleTaskIfNeeded() {
 
 void CompilerDispatcher::ScheduleAbortTask() {
   v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate_);
-  platform_->CallOnForegroundThread(
-      v8_isolate, new AbortTask(isolate_, task_manager_.get(), this));
+  platform_->CallOnForegroundThread(v8_isolate,
+                                    new AbortTask(task_manager_.get(), this));
 }
 
 void CompilerDispatcher::ConsiderJobForBackgroundProcessing(
     CompilerDispatcherJob* job) {
-  if (!job->CanStepNextOnAnyThread()) return;
+  if (!job->NextStepCanRunOnAnyThread()) return;
   {
     base::LockGuard<base::Mutex> lock(&mutex_);
     pending_background_jobs_.insert(job);
   }
-  ScheduleMoreBackgroundTasksIfNeeded();
+  ScheduleMoreWorkerTasksIfNeeded();
 }
 
-void CompilerDispatcher::ScheduleMoreBackgroundTasksIfNeeded() {
+void CompilerDispatcher::ScheduleMoreWorkerTasksIfNeeded() {
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
-               "V8.CompilerDispatcherScheduleMoreBackgroundTasksIfNeeded");
+               "V8.CompilerDispatcherScheduleMoreWorkerTasksIfNeeded");
   {
     base::LockGuard<base::Mutex> lock(&mutex_);
     if (pending_background_jobs_.empty()) return;
-    if (platform_->NumberOfAvailableBackgroundThreads() <=
-        num_background_tasks_) {
+    if (platform_->NumberOfWorkerThreads() <= num_worker_tasks_) {
       return;
     }
-    ++num_background_tasks_;
+    ++num_worker_tasks_;
   }
-  platform_->CallOnBackgroundThread(
-      new BackgroundTask(isolate_, task_manager_.get(), this),
-      v8::Platform::kShortRunningTask);
+  platform_->CallOnWorkerThread(
+      base::make_unique<WorkerTask>(task_manager_.get(), this));
 }
 
 void CompilerDispatcher::DoBackgroundWork() {
@@ -648,7 +565,7 @@ void CompilerDispatcher::DoBackgroundWork() {
 
   {
     base::LockGuard<base::Mutex> lock(&mutex_);
-    --num_background_tasks_;
+    --num_worker_tasks_;
 
     if (running_background_jobs_.empty() && abort_) {
       // This is the last background job that finished. The abort task
@@ -745,7 +662,7 @@ CompilerDispatcher::JobMap::const_iterator CompilerDispatcher::RemoveIfFinished(
   if (trace_compiler_dispatcher_) {
     bool result = !job->second->IsFailed();
     PrintF("CompilerDispatcher: finished working on ");
-    job->second->ShortPrint();
+    job->second->ShortPrintOnMainThread();
     PrintF(": %s\n", result ? "success" : "failure");
     tracer_->DumpStatistics();
   }
@@ -753,18 +670,52 @@ CompilerDispatcher::JobMap::const_iterator CompilerDispatcher::RemoveIfFinished(
   return RemoveJob(job);
 }
 
-CompilerDispatcher::JobMap::const_iterator CompilerDispatcher::RemoveJob(
-    CompilerDispatcher::JobMap::const_iterator job) {
-  job->second->ResetOnMainThread();
-  if (!job->second->shared().is_null()) {
-    shared_to_job_id_.Delete(job->second->shared());
+CompilerDispatcher::JobMap::const_iterator CompilerDispatcher::InsertJob(
+    std::unique_ptr<CompilerDispatcherJob> job) {
+  bool added;
+  JobMap::const_iterator it;
+  std::tie(it, added) =
+      jobs_.insert(std::make_pair(next_job_id_++, std::move(job)));
+  DCHECK(added);
+
+  JobId id = it->first;
+  CompilerDispatcherJob* inserted_job = it->second.get();
+
+  // Maps unoptimized jobs' SFIs to their job id.
+  if (inserted_job->type() ==
+      CompilerDispatcherJob::Type::kUnoptimizedCompile) {
+    Handle<SharedFunctionInfo> shared =
+        inserted_job->AsUnoptimizedCompileJob()->shared();
+    if (!shared.is_null()) {
+      shared_to_unoptimized_job_id_.Set(shared, id);
+    }
   }
-  job = jobs_.erase(job);
+
+  return it;
+}
+
+CompilerDispatcher::JobMap::const_iterator CompilerDispatcher::RemoveJob(
+    CompilerDispatcher::JobMap::const_iterator it) {
+  CompilerDispatcherJob* job = it->second.get();
+  job->ResetOnMainThread(isolate_);
+
+  // Unmaps unoptimized jobs' SFIs to their job id.
+  if (job->type() == CompilerDispatcherJob::Type::kUnoptimizedCompile) {
+    Handle<SharedFunctionInfo> shared =
+        job->AsUnoptimizedCompileJob()->shared();
+    if (!shared.is_null()) {
+      JobId deleted_id;
+      shared_to_unoptimized_job_id_.Delete(shared, &deleted_id);
+      DCHECK_EQ(it->first, deleted_id);
+    }
+  }
+
+  it = jobs_.erase(it);
   if (jobs_.empty()) {
     base::LockGuard<base::Mutex> lock(&mutex_);
-    if (num_background_tasks_ == 0) abort_ = false;
+    if (num_worker_tasks_ == 0) abort_ = false;
   }
-  return job;
+  return it;
 }
 
 }  // namespace internal

@@ -8,24 +8,26 @@
 #include "src/v8.h"
 
 #include "src/accessors.h"
-#include "src/api.h"
+#include "src/api-inl.h"
 #include "src/compilation-cache.h"
 #include "src/execution.h"
-#include "src/factory.h"
 #include "src/field-type.h"
 #include "src/global-handles.h"
+#include "src/heap/factory.h"
 #include "src/heap/incremental-marking.h"
 #include "src/heap/spaces.h"
 #include "src/ic/ic.h"
 #include "src/layout-descriptor.h"
 #include "src/macro-assembler.h"
 #include "src/objects-inl.h"
+#include "src/objects/api-callbacks.h"
 #include "src/property.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/heap/heap-utils.h"
 
-using namespace v8::base;
-using namespace v8::internal;
+namespace v8 {
+namespace internal {
+namespace test_unboxed_doubles {
 
 #if V8_DOUBLE_FIELDS_UNBOXING
 
@@ -73,7 +75,7 @@ static double GetDoubleFieldValue(JSObject* obj, FieldIndex field_index) {
   } else {
     Object* value = obj->RawFastPropertyAt(field_index);
     CHECK(value->IsMutableHeapNumber());
-    return HeapNumber::cast(value)->value();
+    return MutableHeapNumber::cast(value)->value();
   }
 }
 
@@ -84,6 +86,7 @@ void WriteToField(JSObject* object, int descriptor, Object* value) {
 }
 
 const int kNumberOfBits = 32;
+const int kBitsInSmiLayout = SmiValuesAre32Bits() ? 32 : kSmiValueSize - 1;
 
 enum TestPropertyKind {
   PROP_ACCESSOR_INFO,
@@ -117,11 +120,11 @@ static Handle<DescriptorArray> CreateDescriptorArray(Isolate* isolate,
     Descriptor d;
     if (kind == PROP_ACCESSOR_INFO) {
       Handle<AccessorInfo> info =
-          Accessors::MakeAccessor(isolate, name, nullptr, nullptr, NONE);
+          Accessors::MakeAccessor(isolate, name, nullptr, nullptr);
       d = Descriptor::AccessorConstant(name, info, NONE);
 
     } else {
-      d = Descriptor::DataField(name, next_field_offset, NONE,
+      d = Descriptor::DataField(isolate, name, next_field_offset, NONE,
                                 representations[kind]);
     }
     descriptors->Append(&d);
@@ -142,9 +145,9 @@ TEST(LayoutDescriptorBasicFast) {
 
   CHECK(!layout_desc->IsSlowLayout());
   CHECK(layout_desc->IsFastPointerLayout());
-  CHECK_EQ(kSmiValueSize, layout_desc->capacity());
+  CHECK_EQ(kBitsInSmiLayout, layout_desc->capacity());
 
-  for (int i = 0; i < kSmiValueSize + 13; i++) {
+  for (int i = 0; i < kBitsInSmiLayout + 13; i++) {
     CHECK(layout_desc->IsTagged(i));
   }
   CHECK(layout_desc->IsTagged(-1));
@@ -152,7 +155,7 @@ TEST(LayoutDescriptorBasicFast) {
   CHECK(layout_desc->IsTagged(15635));
   CHECK(layout_desc->IsFastPointerLayout());
 
-  for (int i = 0; i < kSmiValueSize; i++) {
+  for (int i = 0; i < kBitsInSmiLayout; i++) {
     layout_desc = layout_desc->SetTaggedForTesting(i, false);
     CHECK(!layout_desc->IsTagged(i));
     layout_desc = layout_desc->SetTaggedForTesting(i, true);
@@ -176,7 +179,7 @@ TEST(LayoutDescriptorBasicSlow) {
   v8::HandleScope scope(CcTest::isolate());
 
   Handle<LayoutDescriptor> layout_descriptor;
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     // All properties tagged.
@@ -189,9 +192,10 @@ TEST(LayoutDescriptorBasicSlow) {
 
     Handle<Map> map = Map::Create(isolate, kPropsCount);
 
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_EQ(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
-    CHECK_EQ(kSmiValueSize, layout_descriptor->capacity());
+    CHECK_EQ(kBitsInSmiLayout, layout_descriptor->capacity());
     InitializeVerifiedMapDescriptors(*map, *descriptors, *layout_descriptor);
   }
 
@@ -206,7 +210,8 @@ TEST(LayoutDescriptorBasicSlow) {
     Handle<Map> map = Map::Create(isolate, inobject_properties);
 
     // Should be fast as the only double property is the first one.
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_NE(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
     CHECK(!layout_descriptor->IsSlowLayout());
     CHECK(!layout_descriptor->IsFastPointerLayout());
@@ -222,11 +227,12 @@ TEST(LayoutDescriptorBasicSlow) {
     int inobject_properties = kPropsCount;
     Handle<Map> map = Map::Create(isolate, inobject_properties);
 
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_NE(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
     CHECK(layout_descriptor->IsSlowLayout());
     CHECK(!layout_descriptor->IsFastPointerLayout());
-    CHECK(layout_descriptor->capacity() > kSmiValueSize);
+    CHECK_GT(layout_descriptor->capacity(), kBitsInSmiLayout);
 
     CHECK(!layout_descriptor->IsTagged(0));
     CHECK(!layout_descriptor->IsTagged(kPropsCount - 1));
@@ -306,7 +312,7 @@ static void TestLayoutDescriptorQueries(int layout_descriptor_length,
       int sequence_length;
       CHECK_EQ(tagged,
                layout_desc->IsTagged(i, max_sequence_length, &sequence_length));
-      CHECK(sequence_length > 0);
+      CHECK_GT(sequence_length, 0);
 
       CHECK_EQ(expected_sequence_length, sequence_length);
     }
@@ -327,20 +333,20 @@ static void TestLayoutDescriptorQueriesFast(int max_sequence_length) {
     for (int i = 0; i < kNumberOfBits; i++) {
       CHECK_EQ(true,
                layout_desc->IsTagged(i, max_sequence_length, &sequence_length));
-      CHECK(sequence_length > 0);
+      CHECK_GT(sequence_length, 0);
       CHECK_EQ(max_sequence_length, sequence_length);
     }
   }
 
   {
     int bit_flip_positions[] = {1000};
-    TestLayoutDescriptorQueries(kSmiValueSize, bit_flip_positions,
+    TestLayoutDescriptorQueries(kBitsInSmiLayout, bit_flip_positions,
                                 max_sequence_length);
   }
 
   {
     int bit_flip_positions[] = {0, 1000};
-    TestLayoutDescriptorQueries(kSmiValueSize, bit_flip_positions,
+    TestLayoutDescriptorQueries(kBitsInSmiLayout, bit_flip_positions,
                                 max_sequence_length);
   }
 
@@ -349,20 +355,20 @@ static void TestLayoutDescriptorQueriesFast(int max_sequence_length) {
     for (int i = 0; i <= kNumberOfBits; i++) {
       bit_flip_positions[i] = i;
     }
-    TestLayoutDescriptorQueries(kSmiValueSize, bit_flip_positions,
+    TestLayoutDescriptorQueries(kBitsInSmiLayout, bit_flip_positions,
                                 max_sequence_length);
   }
 
   {
     int bit_flip_positions[] = {3, 7, 8, 10, 15, 21, 30, 1000};
-    TestLayoutDescriptorQueries(kSmiValueSize, bit_flip_positions,
+    TestLayoutDescriptorQueries(kBitsInSmiLayout, bit_flip_positions,
                                 max_sequence_length);
   }
 
   {
     int bit_flip_positions[] = {0,  1,  2,  3,  5,  7,  9,
                                 12, 15, 18, 22, 26, 29, 1000};
-    TestLayoutDescriptorQueries(kSmiValueSize, bit_flip_positions,
+    TestLayoutDescriptorQueries(kBitsInSmiLayout, bit_flip_positions,
                                 max_sequence_length);
   }
 }
@@ -436,7 +442,7 @@ static void TestLayoutDescriptorQueriesSlow(int max_sequence_length) {
       bit_flip_positions[i] = cur;
       cur = (cur + 1) * 2;
     }
-    CHECK(cur < 10000);
+    CHECK_LT(cur, 10000);
     bit_flip_positions[kMaxNumberOfDescriptors] = 10000;
     TestLayoutDescriptorQueries(kMaxNumberOfDescriptors, bit_flip_positions,
                                 max_sequence_length);
@@ -449,7 +455,7 @@ static void TestLayoutDescriptorQueriesSlow(int max_sequence_length) {
       bit_flip_positions[i] = cur;
       cur = (cur + 1) * 2;
     }
-    CHECK(cur < 10000);
+    CHECK_LT(cur, 10000);
     bit_flip_positions[kMaxNumberOfDescriptors] = 10000;
     TestLayoutDescriptorQueries(kMaxNumberOfDescriptors, bit_flip_positions,
                                 max_sequence_length);
@@ -511,21 +517,24 @@ TEST(LayoutDescriptorCreateNewFast) {
 
   {
     Handle<Map> map = Map::Create(isolate, 0);
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_EQ(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
     InitializeVerifiedMapDescriptors(*map, *descriptors, *layout_descriptor);
   }
 
   {
     Handle<Map> map = Map::Create(isolate, 1);
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_EQ(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
     InitializeVerifiedMapDescriptors(*map, *descriptors, *layout_descriptor);
   }
 
   {
     Handle<Map> map = Map::Create(isolate, 2);
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_NE(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
     CHECK(!layout_descriptor->IsSlowLayout());
     CHECK(layout_descriptor->IsTagged(0));
@@ -543,7 +552,7 @@ TEST(LayoutDescriptorCreateNewSlow) {
   v8::HandleScope scope(CcTest::isolate());
 
   Handle<LayoutDescriptor> layout_descriptor;
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     props[i] = static_cast<TestPropertyKind>(i % PROP_KIND_NUMBER);
@@ -554,21 +563,24 @@ TEST(LayoutDescriptorCreateNewSlow) {
 
   {
     Handle<Map> map = Map::Create(isolate, 0);
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_EQ(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
     InitializeVerifiedMapDescriptors(*map, *descriptors, *layout_descriptor);
   }
 
   {
     Handle<Map> map = Map::Create(isolate, 1);
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_EQ(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
     InitializeVerifiedMapDescriptors(*map, *descriptors, *layout_descriptor);
   }
 
   {
     Handle<Map> map = Map::Create(isolate, 2);
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_NE(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
     CHECK(!layout_descriptor->IsSlowLayout());
     CHECK(layout_descriptor->IsTagged(0));
@@ -581,7 +593,8 @@ TEST(LayoutDescriptorCreateNewSlow) {
   {
     int inobject_properties = kPropsCount / 2;
     Handle<Map> map = Map::Create(isolate, inobject_properties);
-    layout_descriptor = LayoutDescriptor::New(map, descriptors, kPropsCount);
+    layout_descriptor =
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
     CHECK_NE(LayoutDescriptor::FastPointerLayout(), *layout_descriptor);
     CHECK(layout_descriptor->IsSlowLayout());
     for (int i = 0; i < inobject_properties; i++) {
@@ -597,7 +610,7 @@ TEST(LayoutDescriptorCreateNewSlow) {
 
     // Now test LayoutDescriptor::cast_gc_safe().
     Handle<LayoutDescriptor> layout_descriptor_copy =
-        LayoutDescriptor::New(map, descriptors, kPropsCount);
+        LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
 
     LayoutDescriptor* layout_desc = *layout_descriptor;
     CHECK_EQ(layout_desc, LayoutDescriptor::cast(layout_desc));
@@ -641,15 +654,15 @@ static Handle<LayoutDescriptor> TestLayoutDescriptorAppend(
     Descriptor d;
     if (kind == PROP_ACCESSOR_INFO) {
       Handle<AccessorInfo> info =
-          Accessors::MakeAccessor(isolate, name, nullptr, nullptr, NONE);
+          Accessors::MakeAccessor(isolate, name, nullptr, nullptr);
       d = Descriptor::AccessorConstant(name, info, NONE);
 
     } else {
-      d = Descriptor::DataField(name, next_field_offset, NONE,
+      d = Descriptor::DataField(isolate, name, next_field_offset, NONE,
                                 representations[kind]);
     }
     PropertyDetails details = d.GetDetails();
-    layout_descriptor = LayoutDescriptor::ShareAppend(map, details);
+    layout_descriptor = LayoutDescriptor::ShareAppend(isolate, map, details);
     descriptors->Append(&d);
     if (details.location() == kField) {
       int field_width_in_words = details.field_width_in_words();
@@ -677,7 +690,7 @@ TEST(LayoutDescriptorAppend) {
   v8::HandleScope scope(CcTest::isolate());
 
   Handle<LayoutDescriptor> layout_descriptor;
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     props[i] = static_cast<TestPropertyKind>(i % PROP_KIND_NUMBER);
@@ -692,10 +705,10 @@ TEST(LayoutDescriptorAppend) {
   CHECK(!layout_descriptor->IsSlowLayout());
 
   layout_descriptor =
-      TestLayoutDescriptorAppend(isolate, kSmiValueSize, props, kPropsCount);
+      TestLayoutDescriptorAppend(isolate, kBitsInSmiLayout, props, kPropsCount);
   CHECK(!layout_descriptor->IsSlowLayout());
 
-  layout_descriptor = TestLayoutDescriptorAppend(isolate, kSmiValueSize * 2,
+  layout_descriptor = TestLayoutDescriptorAppend(isolate, kBitsInSmiLayout * 2,
                                                  props, kPropsCount);
   CHECK(layout_descriptor->IsSlowLayout());
 
@@ -711,7 +724,7 @@ TEST(LayoutDescriptorAppendAllDoubles) {
   v8::HandleScope scope(CcTest::isolate());
 
   Handle<LayoutDescriptor> layout_descriptor;
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     props[i] = PROP_DOUBLE;
@@ -726,14 +739,14 @@ TEST(LayoutDescriptorAppendAllDoubles) {
   CHECK(!layout_descriptor->IsSlowLayout());
 
   layout_descriptor =
-      TestLayoutDescriptorAppend(isolate, kSmiValueSize, props, kPropsCount);
+      TestLayoutDescriptorAppend(isolate, kBitsInSmiLayout, props, kPropsCount);
   CHECK(!layout_descriptor->IsSlowLayout());
 
-  layout_descriptor = TestLayoutDescriptorAppend(isolate, kSmiValueSize + 1,
+  layout_descriptor = TestLayoutDescriptorAppend(isolate, kBitsInSmiLayout + 1,
                                                  props, kPropsCount);
   CHECK(layout_descriptor->IsSlowLayout());
 
-  layout_descriptor = TestLayoutDescriptorAppend(isolate, kSmiValueSize * 2,
+  layout_descriptor = TestLayoutDescriptorAppend(isolate, kBitsInSmiLayout * 2,
                                                  props, kPropsCount);
   CHECK(layout_descriptor->IsSlowLayout());
 
@@ -743,12 +756,12 @@ TEST(LayoutDescriptorAppendAllDoubles) {
 
   {
     // Ensure layout descriptor switches into slow mode at the right moment.
-    layout_descriptor =
-        TestLayoutDescriptorAppend(isolate, kPropsCount, props, kSmiValueSize);
+    layout_descriptor = TestLayoutDescriptorAppend(isolate, kPropsCount, props,
+                                                   kBitsInSmiLayout);
     CHECK(!layout_descriptor->IsSlowLayout());
 
     layout_descriptor = TestLayoutDescriptorAppend(isolate, kPropsCount, props,
-                                                   kSmiValueSize + 1);
+                                                   kBitsInSmiLayout + 1);
     CHECK(layout_descriptor->IsSlowLayout());
   }
 }
@@ -760,7 +773,7 @@ static Handle<LayoutDescriptor> TestLayoutDescriptorAppendIfFastOrUseFull(
   Handle<Map> initial_map = Map::Create(isolate, inobject_properties);
 
   Handle<LayoutDescriptor> full_layout_descriptor = LayoutDescriptor::New(
-      initial_map, descriptors, descriptors->number_of_descriptors());
+      isolate, initial_map, descriptors, descriptors->number_of_descriptors());
 
   int nof = 0;
   bool switched_to_slow_mode = false;
@@ -768,7 +781,7 @@ static Handle<LayoutDescriptor> TestLayoutDescriptorAppendIfFastOrUseFull(
   // This method calls LayoutDescriptor::AppendIfFastOrUseFull() internally
   // and does all the required map-descriptors related book keeping.
   Handle<Map> last_map = Map::AddMissingTransitionsForTesting(
-      initial_map, descriptors, full_layout_descriptor);
+      isolate, initial_map, descriptors, full_layout_descriptor);
 
   // Follow back pointers to construct a sequence of maps from |map|
   // to |last_map|.
@@ -828,7 +841,7 @@ TEST(LayoutDescriptorAppendIfFastOrUseFull) {
   v8::HandleScope scope(CcTest::isolate());
 
   Handle<LayoutDescriptor> layout_descriptor;
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     props[i] = static_cast<TestPropertyKind>(i % PROP_KIND_NUMBER);
@@ -845,11 +858,11 @@ TEST(LayoutDescriptorAppendIfFastOrUseFull) {
   CHECK(!layout_descriptor->IsSlowLayout());
 
   layout_descriptor = TestLayoutDescriptorAppendIfFastOrUseFull(
-      isolate, kSmiValueSize, descriptors, kPropsCount);
+      isolate, kBitsInSmiLayout, descriptors, kPropsCount);
   CHECK(!layout_descriptor->IsSlowLayout());
 
   layout_descriptor = TestLayoutDescriptorAppendIfFastOrUseFull(
-      isolate, kSmiValueSize * 2, descriptors, kPropsCount);
+      isolate, kBitsInSmiLayout * 2, descriptors, kPropsCount);
   CHECK(layout_descriptor->IsSlowLayout());
 
   layout_descriptor = TestLayoutDescriptorAppendIfFastOrUseFull(
@@ -864,7 +877,7 @@ TEST(LayoutDescriptorAppendIfFastOrUseFullAllDoubles) {
   v8::HandleScope scope(CcTest::isolate());
 
   Handle<LayoutDescriptor> layout_descriptor;
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     props[i] = PROP_DOUBLE;
@@ -881,15 +894,15 @@ TEST(LayoutDescriptorAppendIfFastOrUseFullAllDoubles) {
   CHECK(!layout_descriptor->IsSlowLayout());
 
   layout_descriptor = TestLayoutDescriptorAppendIfFastOrUseFull(
-      isolate, kSmiValueSize, descriptors, kPropsCount);
+      isolate, kBitsInSmiLayout, descriptors, kPropsCount);
   CHECK(!layout_descriptor->IsSlowLayout());
 
   layout_descriptor = TestLayoutDescriptorAppendIfFastOrUseFull(
-      isolate, kSmiValueSize + 1, descriptors, kPropsCount);
+      isolate, kBitsInSmiLayout + 1, descriptors, kPropsCount);
   CHECK(layout_descriptor->IsSlowLayout());
 
   layout_descriptor = TestLayoutDescriptorAppendIfFastOrUseFull(
-      isolate, kSmiValueSize * 2, descriptors, kPropsCount);
+      isolate, kBitsInSmiLayout * 2, descriptors, kPropsCount);
   CHECK(layout_descriptor->IsSlowLayout());
 
   layout_descriptor = TestLayoutDescriptorAppendIfFastOrUseFull(
@@ -899,11 +912,11 @@ TEST(LayoutDescriptorAppendIfFastOrUseFullAllDoubles) {
   {
     // Ensure layout descriptor switches into slow mode at the right moment.
     layout_descriptor = TestLayoutDescriptorAppendIfFastOrUseFull(
-        isolate, kPropsCount, descriptors, kSmiValueSize);
+        isolate, kPropsCount, descriptors, kBitsInSmiLayout);
     CHECK(!layout_descriptor->IsSlowLayout());
 
     layout_descriptor = TestLayoutDescriptorAppendIfFastOrUseFull(
-        isolate, kPropsCount, descriptors, kSmiValueSize + 1);
+        isolate, kPropsCount, descriptors, kBitsInSmiLayout + 1);
     CHECK(layout_descriptor->IsSlowLayout());
   }
 }
@@ -920,7 +933,7 @@ TEST(Regress436816) {
   // mid-test states would fail heap verification.
   CcTest::CollectAllGarbage();
 
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     props[i] = PROP_DOUBLE;
@@ -930,12 +943,12 @@ TEST(Regress436816) {
 
   Handle<Map> map = Map::Create(isolate, kPropsCount);
   Handle<LayoutDescriptor> layout_descriptor =
-      LayoutDescriptor::New(map, descriptors, kPropsCount);
+      LayoutDescriptor::New(isolate, map, descriptors, kPropsCount);
   map->InitializeDescriptors(*descriptors, *layout_descriptor);
 
   Handle<JSObject> object = factory->NewJSObjectFromMap(map, TENURED);
 
-  Address fake_address = reinterpret_cast<Address>(~kHeapObjectTagMask);
+  Address fake_address = static_cast<Address>(~kHeapObjectTagMask);
   HeapObject* fake_object = HeapObject::FromAddress(fake_address);
   CHECK(fake_object->IsHeapObject());
 
@@ -949,7 +962,7 @@ TEST(Regress436816) {
   CHECK(!object->map()->HasFastPointerLayout());
 
   Handle<Map> normalized_map =
-      Map::Normalize(map, KEEP_INOBJECT_PROPERTIES, "testing");
+      Map::Normalize(isolate, map, KEEP_INOBJECT_PROPERTIES, "testing");
   JSObject::MigrateToMap(object, normalized_map);
   CHECK(!object->HasFastProperties());
   CHECK(object->map()->HasFastPointerLayout());
@@ -972,14 +985,15 @@ TEST(DescriptorArrayTrimming) {
   Handle<FieldType> any_type = FieldType::Any(isolate);
   Handle<Map> map = Map::Create(isolate, kFieldCount);
   for (int i = 0; i < kSplitFieldIndex; i++) {
-    map = Map::CopyWithField(map, MakeName("prop", i), any_type, NONE, kMutable,
-                             Representation::Smi(), INSERT_TRANSITION)
+    map = Map::CopyWithField(isolate, map, MakeName("prop", i), any_type, NONE,
+                             PropertyConstness::kMutable, Representation::Smi(),
+                             INSERT_TRANSITION)
               .ToHandleChecked();
   }
-  map =
-      Map::CopyWithField(map, MakeName("dbl", kSplitFieldIndex), any_type, NONE,
-                         kMutable, Representation::Double(), INSERT_TRANSITION)
-          .ToHandleChecked();
+  map = Map::CopyWithField(isolate, map, MakeName("dbl", kSplitFieldIndex),
+                           any_type, NONE, PropertyConstness::kMutable,
+                           Representation::Double(), INSERT_TRANSITION)
+            .ToHandleChecked();
   CHECK(map->layout_descriptor()->IsConsistentWithMap(*map, true));
   CHECK(map->layout_descriptor()->IsSlowLayout());
   CHECK(map->owns_descriptors());
@@ -991,9 +1005,9 @@ TEST(DescriptorArrayTrimming) {
 
     Handle<Map> tmp_map = map;
     for (int i = kSplitFieldIndex + 1; i < kFieldCount; i++) {
-      tmp_map = Map::CopyWithField(tmp_map, MakeName("dbl", i), any_type, NONE,
-                                   kMutable, Representation::Double(),
-                                   INSERT_TRANSITION)
+      tmp_map = Map::CopyWithField(isolate, tmp_map, MakeName("dbl", i),
+                                   any_type, NONE, PropertyConstness::kMutable,
+                                   Representation::Double(), INSERT_TRANSITION)
                     .ToHandleChecked();
       CHECK(tmp_map->layout_descriptor()->IsConsistentWithMap(*tmp_map, true));
     }
@@ -1031,16 +1045,16 @@ TEST(DescriptorArrayTrimming) {
 
     Handle<Map> tmp_map = map;
     for (int i = kSplitFieldIndex + 1; i < kFieldCount - 1; i++) {
-      tmp_map = Map::CopyWithField(tmp_map, MakeName("tagged", i), any_type,
-                                   NONE, kMutable, Representation::Tagged(),
-                                   INSERT_TRANSITION)
+      tmp_map = Map::CopyWithField(isolate, tmp_map, MakeName("tagged", i),
+                                   any_type, NONE, PropertyConstness::kMutable,
+                                   Representation::Tagged(), INSERT_TRANSITION)
                     .ToHandleChecked();
       CHECK(tmp_map->layout_descriptor()->IsConsistentWithMap(*tmp_map, true));
     }
-    tmp_map =
-        Map::CopyWithField(tmp_map, MakeString("dbl"), any_type, NONE, kMutable,
-                           Representation::Double(), INSERT_TRANSITION)
-            .ToHandleChecked();
+    tmp_map = Map::CopyWithField(isolate, tmp_map, MakeString("dbl"), any_type,
+                                 NONE, PropertyConstness::kMutable,
+                                 Representation::Double(), INSERT_TRANSITION)
+                  .ToHandleChecked();
     CHECK(tmp_map->layout_descriptor()->IsConsistentWithMap(*tmp_map, true));
     // Check that descriptors are shared.
     CHECK(tmp_map->owns_descriptors());
@@ -1063,7 +1077,8 @@ TEST(DoScavenge) {
 
   Handle<FieldType> any_type = FieldType::Any(isolate);
   Handle<Map> map = Map::Create(isolate, 10);
-  map = Map::CopyWithField(map, MakeName("prop", 0), any_type, NONE, kMutable,
+  map = Map::CopyWithField(isolate, map, MakeName("prop", 0), any_type, NONE,
+                           PropertyConstness::kMutable,
                            Representation::Double(), INSERT_TRANSITION)
             .ToHandleChecked();
 
@@ -1095,7 +1110,7 @@ TEST(DoScavenge) {
   double boom_value = bit_cast<double>(fake_object);
 
   FieldIndex field_index = FieldIndex::ForDescriptor(obj->map(), 0);
-  Handle<HeapNumber> boom_number = factory->NewHeapNumber(boom_value, MUTABLE);
+  auto boom_number = factory->NewMutableHeapNumber(boom_value);
   obj->FastPropertyAtPut(field_index, *boom_number);
 
   // Now |obj| moves to old gen and it has a double field that looks like
@@ -1110,7 +1125,7 @@ TEST(DoScavenge) {
 
 TEST(DoScavengeWithIncrementalWriteBarrier) {
   if (FLAG_never_compact || !FLAG_incremental_marking) return;
-  FLAG_stress_incremental_marking = false;
+  ManualGCScope manual_gc_scope;
   CcTest::InitializeVM();
   v8::HandleScope scope(CcTest::isolate());
   Isolate* isolate = CcTest::i_isolate();
@@ -1126,10 +1141,12 @@ TEST(DoScavengeWithIncrementalWriteBarrier) {
 
   Handle<FieldType> any_type = FieldType::Any(isolate);
   Handle<Map> map = Map::Create(isolate, 10);
-  map = Map::CopyWithField(map, MakeName("prop", 0), any_type, NONE, kMutable,
+  map = Map::CopyWithField(isolate, map, MakeName("prop", 0), any_type, NONE,
+                           PropertyConstness::kMutable,
                            Representation::Double(), INSERT_TRANSITION)
             .ToHandleChecked();
-  map = Map::CopyWithField(map, MakeName("prop", 1), any_type, NONE, kMutable,
+  map = Map::CopyWithField(isolate, map, MakeName("prop", 1), any_type, NONE,
+                           PropertyConstness::kMutable,
                            Representation::Tagged(), INSERT_TRANSITION)
             .ToHandleChecked();
 
@@ -1178,7 +1195,9 @@ TEST(DoScavengeWithIncrementalWriteBarrier) {
   // in compacting mode and |obj_value|'s page is an evacuation candidate).
   IncrementalMarking* marking = heap->incremental_marking();
   CHECK(marking->IsCompacting());
-  CHECK(ObjectMarking::IsBlack(*obj, MarkingState::Internal(*obj)));
+  IncrementalMarking::MarkingState* marking_state =
+      heap->incremental_marking()->marking_state();
+  CHECK(marking_state->IsBlack(*obj));
   CHECK(MarkCompactCollector::IsOnEvacuationCandidate(*obj_value));
 
   // Trigger GCs so that |obj| moves to old gen.
@@ -1206,7 +1225,7 @@ static void TestLayoutDescriptorHelper(Isolate* isolate,
   Handle<Map> map = Map::Create(isolate, inobject_properties);
 
   Handle<LayoutDescriptor> layout_descriptor = LayoutDescriptor::New(
-      map, descriptors, descriptors->number_of_descriptors());
+      isolate, map, descriptors, descriptors->number_of_descriptors());
   InitializeVerifiedMapDescriptors(*map, *descriptors, *layout_descriptor);
 
   LayoutDescriptorHelper helper(*map);
@@ -1232,8 +1251,8 @@ static void TestLayoutDescriptorHelper(Isolate* isolate,
     CHECK_EQ(expected_tagged, helper.IsTagged(index.offset()));
     CHECK_EQ(expected_tagged, helper.IsTagged(index.offset(), instance_size,
                                               &end_of_region_offset));
-    CHECK(end_of_region_offset > 0);
-    CHECK(end_of_region_offset % kPointerSize == 0);
+    CHECK_GT(end_of_region_offset, 0);
+    CHECK_EQ(end_of_region_offset % kPointerSize, 0);
     CHECK(end_of_region_offset <= instance_size);
 
     for (int offset = index.offset(); offset < end_of_region_offset;
@@ -1268,7 +1287,7 @@ TEST(LayoutDescriptorHelperMixed) {
   v8::HandleScope scope(CcTest::isolate());
 
   Handle<LayoutDescriptor> layout_descriptor;
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     props[i] = static_cast<TestPropertyKind>(i % PROP_KIND_NUMBER);
@@ -1280,9 +1299,10 @@ TEST(LayoutDescriptorHelperMixed) {
 
   TestLayoutDescriptorHelper(isolate, 13, descriptors, kPropsCount);
 
-  TestLayoutDescriptorHelper(isolate, kSmiValueSize, descriptors, kPropsCount);
+  TestLayoutDescriptorHelper(isolate, kBitsInSmiLayout, descriptors,
+                             kPropsCount);
 
-  TestLayoutDescriptorHelper(isolate, kSmiValueSize * 2, descriptors,
+  TestLayoutDescriptorHelper(isolate, kBitsInSmiLayout * 2, descriptors,
                              kPropsCount);
 
   TestLayoutDescriptorHelper(isolate, kPropsCount, descriptors, kPropsCount);
@@ -1295,7 +1315,7 @@ TEST(LayoutDescriptorHelperAllTagged) {
   v8::HandleScope scope(CcTest::isolate());
 
   Handle<LayoutDescriptor> layout_descriptor;
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     props[i] = PROP_TAGGED;
@@ -1307,9 +1327,10 @@ TEST(LayoutDescriptorHelperAllTagged) {
 
   TestLayoutDescriptorHelper(isolate, 13, descriptors, kPropsCount);
 
-  TestLayoutDescriptorHelper(isolate, kSmiValueSize, descriptors, kPropsCount);
+  TestLayoutDescriptorHelper(isolate, kBitsInSmiLayout, descriptors,
+                             kPropsCount);
 
-  TestLayoutDescriptorHelper(isolate, kSmiValueSize * 2, descriptors,
+  TestLayoutDescriptorHelper(isolate, kBitsInSmiLayout * 2, descriptors,
                              kPropsCount);
 
   TestLayoutDescriptorHelper(isolate, kPropsCount, descriptors, kPropsCount);
@@ -1322,7 +1343,7 @@ TEST(LayoutDescriptorHelperAllDoubles) {
   v8::HandleScope scope(CcTest::isolate());
 
   Handle<LayoutDescriptor> layout_descriptor;
-  const int kPropsCount = kSmiValueSize * 3;
+  const int kPropsCount = kBitsInSmiLayout * 3;
   TestPropertyKind props[kPropsCount];
   for (int i = 0; i < kPropsCount; i++) {
     props[i] = PROP_DOUBLE;
@@ -1334,9 +1355,10 @@ TEST(LayoutDescriptorHelperAllDoubles) {
 
   TestLayoutDescriptorHelper(isolate, 13, descriptors, kPropsCount);
 
-  TestLayoutDescriptorHelper(isolate, kSmiValueSize, descriptors, kPropsCount);
+  TestLayoutDescriptorHelper(isolate, kBitsInSmiLayout, descriptors,
+                             kPropsCount);
 
-  TestLayoutDescriptorHelper(isolate, kSmiValueSize * 2, descriptors,
+  TestLayoutDescriptorHelper(isolate, kBitsInSmiLayout * 2, descriptors,
                              kPropsCount);
 
   TestLayoutDescriptorHelper(isolate, kPropsCount, descriptors, kPropsCount);
@@ -1354,14 +1376,15 @@ TEST(LayoutDescriptorSharing) {
     Handle<Map> map = Map::Create(isolate, 64);
     for (int i = 0; i < 32; i++) {
       Handle<String> name = MakeName("prop", i);
-      map = Map::CopyWithField(map, name, any_type, NONE, kMutable,
+      map = Map::CopyWithField(isolate, map, name, any_type, NONE,
+                               PropertyConstness::kMutable,
                                Representation::Smi(), INSERT_TRANSITION)
                 .ToHandleChecked();
     }
-    split_map =
-        Map::CopyWithField(map, MakeString("dbl"), any_type, NONE, kMutable,
-                           Representation::Double(), INSERT_TRANSITION)
-            .ToHandleChecked();
+    split_map = Map::CopyWithField(isolate, map, MakeString("dbl"), any_type,
+                                   NONE, PropertyConstness::kMutable,
+                                   Representation::Double(), INSERT_TRANSITION)
+                    .ToHandleChecked();
   }
   Handle<LayoutDescriptor> split_layout_descriptor(
       split_map->layout_descriptor(), isolate);
@@ -1370,8 +1393,9 @@ TEST(LayoutDescriptorSharing) {
   CHECK(split_map->owns_descriptors());
 
   Handle<Map> map1 =
-      Map::CopyWithField(split_map, MakeString("foo"), any_type, NONE, kMutable,
-                         Representation::Double(), INSERT_TRANSITION)
+      Map::CopyWithField(isolate, split_map, MakeString("foo"), any_type, NONE,
+                         PropertyConstness::kMutable, Representation::Double(),
+                         INSERT_TRANSITION)
           .ToHandleChecked();
   CHECK(!split_map->owns_descriptors());
   CHECK_EQ(*split_layout_descriptor, split_map->layout_descriptor());
@@ -1382,8 +1406,9 @@ TEST(LayoutDescriptorSharing) {
   CHECK(map1->layout_descriptor()->IsConsistentWithMap(*map1, true));
 
   Handle<Map> map2 =
-      Map::CopyWithField(split_map, MakeString("bar"), any_type, NONE, kMutable,
-                         Representation::Tagged(), INSERT_TRANSITION)
+      Map::CopyWithField(isolate, split_map, MakeString("bar"), any_type, NONE,
+                         PropertyConstness::kMutable, Representation::Tagged(),
+                         INSERT_TRANSITION)
           .ToHandleChecked();
 
   // Layout descriptors should not be shared with |split_map|.
@@ -1420,7 +1445,7 @@ static void TestWriteBarrier(Handle<Map> map, Handle<Map> new_map,
     obj_value = factory->NewHeapNumber(0.);
   }
 
-  CHECK(heap->InNewSpace(*obj_value));
+  CHECK(Heap::InNewSpace(*obj_value));
 
   {
     FieldIndex index = FieldIndex::ForDescriptor(*map, tagged_descriptor);
@@ -1459,7 +1484,7 @@ static void TestIncrementalWriteBarrier(Handle<Map> map, Handle<Map> new_map,
                                         int double_descriptor,
                                         bool check_tagged_value = true) {
   if (FLAG_never_compact || !FLAG_incremental_marking) return;
-  FLAG_stress_incremental_marking = false;
+  ManualGCScope manual_gc_scope;
   FLAG_manual_evacuation_candidates_selection = true;
   Isolate* isolate = CcTest::i_isolate();
   Factory* factory = isolate->factory();
@@ -1499,8 +1524,9 @@ static void TestIncrementalWriteBarrier(Handle<Map> map, Handle<Map> new_map,
   // still active and |obj_value|'s page is indeed an evacuation candidate).
   IncrementalMarking* marking = heap->incremental_marking();
   CHECK(marking->IsMarking());
-  CHECK(ObjectMarking::IsBlack(*obj, MarkingState::Internal(*obj)));
-  CHECK(ObjectMarking::IsBlack(*obj_value, MarkingState::Internal(*obj_value)));
+  IncrementalMarking::MarkingState* marking_state = marking->marking_state();
+  CHECK(marking_state->IsBlack(*obj));
+  CHECK(marking_state->IsBlack(*obj_value));
   CHECK(MarkCompactCollector::IsOnEvacuationCandidate(*obj_value));
 
   // Trigger incremental write barrier, which should add a slot to remembered
@@ -1515,7 +1541,7 @@ static void TestIncrementalWriteBarrier(Handle<Map> map, Handle<Map> new_map,
   // barrier.
   JSObject::MigrateToMap(obj, new_map);
 
-  uint64_t boom_value = UINT64_C(0xbaad0176a37c28e1);
+  uint64_t boom_value = UINT64_C(0xBAAD0176A37C28E1);
 
   FieldIndex double_field_index =
       FieldIndex::ForDescriptor(*new_map, double_descriptor);
@@ -1542,7 +1568,7 @@ enum OldToWriteBarrierKind {
 };
 static void TestWriteBarrierObjectShiftFieldsRight(
     OldToWriteBarrierKind write_barrier_kind) {
-  FLAG_stress_incremental_marking = false;
+  ManualGCScope manual_gc_scope;
   CcTest::InitializeVM();
   Isolate* isolate = CcTest::i_isolate();
   v8::HandleScope scope(CcTest::isolate());
@@ -1554,18 +1580,21 @@ static void TestWriteBarrierObjectShiftFieldsRight(
   Handle<JSObject> func = GetObject("func");
 
   Handle<Map> map = Map::Create(isolate, 10);
-  map = Map::CopyWithConstant(map, MakeName("prop", 0), func, NONE,
-                              INSERT_TRANSITION).ToHandleChecked();
-  map = Map::CopyWithField(map, MakeName("prop", 1), any_type, NONE, kMutable,
+  map = Map::CopyWithConstant(isolate, map, MakeName("prop", 0), func, NONE,
+                              INSERT_TRANSITION)
+            .ToHandleChecked();
+  map = Map::CopyWithField(isolate, map, MakeName("prop", 1), any_type, NONE,
+                           PropertyConstness::kMutable,
                            Representation::Double(), INSERT_TRANSITION)
             .ToHandleChecked();
-  map = Map::CopyWithField(map, MakeName("prop", 2), any_type, NONE, kMutable,
+  map = Map::CopyWithField(isolate, map, MakeName("prop", 2), any_type, NONE,
+                           PropertyConstness::kMutable,
                            Representation::Tagged(), INSERT_TRANSITION)
             .ToHandleChecked();
 
   // Shift fields right by turning constant property to a field.
   Handle<Map> new_map = Map::ReconfigureProperty(
-      map, 0, kData, NONE, Representation::Tagged(), any_type);
+      isolate, map, 0, kData, NONE, Representation::Tagged(), any_type);
 
   if (write_barrier_kind == OLD_TO_NEW_WRITE_BARRIER) {
     TestWriteBarrier(map, new_map, 2, 1);
@@ -1594,3 +1623,7 @@ TEST(IncrementalWriteBarrierObjectShiftFieldsRight) {
 // Map::ReconfigureProperty() supports that.
 
 #endif
+
+}  // namespace test_unboxed_doubles
+}  // namespace internal
+}  // namespace v8

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef V8_WASM_RESULT_H_
-#define V8_WASM_RESULT_H_
+#ifndef V8_WASM_WASM_RESULT_H_
+#define V8_WASM_WASM_RESULT_H_
 
 #include <cstdarg>
 #include <memory>
@@ -11,8 +11,8 @@
 #include "src/base/compiler-specific.h"
 #include "src/utils.h"
 
-#include "src/handles.h"
 #include "src/globals.h"
+#include "src/handles.h"
 
 namespace v8 {
 namespace internal {
@@ -24,14 +24,15 @@ namespace wasm {
 // Base class for Result<T>.
 class V8_EXPORT_PRIVATE ResultBase {
  protected:
-  ResultBase(ResultBase&& other)
-      : error_offset_(other.error_offset_),
-        error_msg_(std::move(other.error_msg_)) {}
   ResultBase() = default;
 
-  ResultBase& operator=(ResultBase&& other) = default;
+  ResultBase& operator=(ResultBase&& other) V8_NOEXCEPT = default;
 
  public:
+  ResultBase(ResultBase&& other) V8_NOEXCEPT
+      : error_offset_(other.error_offset_),
+        error_msg_(std::move(other.error_msg_)) {}
+
   void error(uint32_t offset, std::string error_msg);
 
   void PRINTF_FORMAT(2, 3) error(const char* format, ...) {
@@ -72,10 +73,10 @@ class Result : public ResultBase {
   explicit Result(S&& value) : val(std::forward<S>(value)) {}
 
   template <typename S>
-  Result(Result<S>&& other)
-      : ResultBase(std::move(other)), val(std::move(other.val)) {}
+  Result(Result<S>&& other) V8_NOEXCEPT : ResultBase(std::move(other)),
+                                          val(std::move(other.val)) {}
 
-  Result& operator=(Result&& other) = default;
+  Result& operator=(Result&& other) V8_NOEXCEPT = default;
 
   static Result<T> PRINTF_FORMAT(1, 2) Error(const char* format, ...) {
     va_list args;
@@ -98,7 +99,7 @@ class V8_EXPORT_PRIVATE ErrorThrower {
   ErrorThrower(Isolate* isolate, const char* context)
       : isolate_(isolate), context_(context) {}
   // Explicitly allow move-construction. Disallow copy (below).
-  ErrorThrower(ErrorThrower&& other);
+  ErrorThrower(ErrorThrower&& other) V8_NOEXCEPT;
   ~ErrorThrower();
 
   PRINTF_FORMAT(2, 3) void TypeError(const char* fmt, ...);
@@ -115,13 +116,14 @@ class V8_EXPORT_PRIVATE ErrorThrower {
   }
 
   // Create and return exception object.
-  MUST_USE_RESULT Handle<Object> Reify();
+  V8_WARN_UNUSED_RESULT Handle<Object> Reify();
 
   // Reset any error which was set on this thrower.
   void Reset();
 
   bool error() const { return error_type_ != kNone; }
   bool wasm_error() { return error_type_ >= kFirstWasmError; }
+  const char* error_msg() { return error_msg_.c_str(); }
 
   Isolate* isolate() const { return isolate_; }
 
@@ -157,4 +159,4 @@ class V8_EXPORT_PRIVATE ErrorThrower {
 }  // namespace internal
 }  // namespace v8
 
-#endif
+#endif  // V8_WASM_WASM_RESULT_H_

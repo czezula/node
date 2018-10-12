@@ -1,10 +1,12 @@
 'use strict';
+// Flags: --expose-internals
 const common = require('../common');
 
 if (!common.hasIntl)
   common.skip('missing Intl');
 
-const icu = process.binding('icu');
+const { internalBinding } = require('internal/test/binding');
+const icu = internalBinding('icu');
 const assert = require('assert');
 
 const tests = require('../fixtures/url-idna.js');
@@ -34,13 +36,12 @@ const wptToASCIITests = require('../fixtures/url-toascii.js');
     if (output === null) {
       assert.throws(() => icu.toASCII(input),
                     errMessage, `ToASCII ${caseComment}`);
-      assert.doesNotThrow(() => icu.toASCII(input, true),
-                          `ToASCII ${caseComment} in lenient mode`);
+      icu.toASCII(input, true); // Should not throw.
     } else {
       assert.strictEqual(icu.toASCII(input), output, `ToASCII ${caseComment}`);
       assert.strictEqual(icu.toASCII(input, true), output,
                          `ToASCII ${caseComment} in lenient mode`);
     }
-    assert.doesNotThrow(() => icu.toUnicode(input), `ToUnicode ${caseComment}`);
+    icu.toUnicode(input); // Should not throw.
   }
 }

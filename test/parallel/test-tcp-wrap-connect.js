@@ -1,12 +1,17 @@
+// Flags: --expose-internals
 'use strict';
 require('../common');
 const assert = require('assert');
-const TCP = process.binding('tcp_wrap').TCP;
-const TCPConnectWrap = process.binding('tcp_wrap').TCPConnectWrap;
-const ShutdownWrap = process.binding('stream_wrap').ShutdownWrap;
+const { internalBinding } = require('internal/test/binding');
+const {
+  TCP,
+  constants: TCPConstants,
+  TCPConnectWrap
+} = internalBinding('tcp_wrap');
+const { ShutdownWrap } = internalBinding('stream_wrap');
 
 function makeConnection() {
-  const client = new TCP();
+  const client = new TCP(TCPConstants.SOCKET);
 
   const req = new TCPConnectWrap();
   const err = client.connect(req, '127.0.0.1', this.address().port);
@@ -23,17 +28,15 @@ function makeConnection() {
     const err = client.shutdown(shutdownReq);
     assert.strictEqual(err, 0);
 
-    shutdownReq.oncomplete = function(status, client_, req_) {
+    shutdownReq.oncomplete = function(status, client_, error) {
       assert.strictEqual(0, status);
       assert.strictEqual(client, client_);
-      assert.strictEqual(shutdownReq, req_);
+      assert.strictEqual(error, undefined);
       shutdownCount++;
       client.close();
     };
   };
 }
-
-/////
 
 let connectCount = 0;
 let endCount = 0;

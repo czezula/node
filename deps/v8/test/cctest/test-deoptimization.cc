@@ -29,7 +29,7 @@
 
 #include "src/v8.h"
 
-#include "src/api.h"
+#include "src/api-inl.h"
 #include "src/base/platform/platform.h"
 #include "src/compilation-cache.h"
 #include "src/debug/debug.h"
@@ -42,9 +42,7 @@ using ::v8::base::OS;
 using ::v8::internal::Deoptimizer;
 using ::v8::internal::EmbeddedVector;
 using ::v8::internal::Handle;
-using ::v8::internal::Isolate;
 using ::v8::internal::JSFunction;
-using ::v8::internal::Object;
 
 // Size of temp buffer for formatting small strings.
 #define SMALL_STRING_BUFFER_SIZE 80
@@ -466,7 +464,7 @@ UNINITIALIZED_TEST(DeoptimizeBinaryOperationADDString) {
     v8::Local<v8::Value> result =
         env->Global()->Get(env.local(), v8_str("result")).ToLocalChecked();
     CHECK(result->IsString());
-    v8::String::Utf8Value utf8(result);
+    v8::String::Utf8Value utf8(isolate, result);
     CHECK_EQ(0, strcmp("a+an X", *utf8));
     CHECK_EQ(0, Deoptimizer::GetDeoptimizedCodeCount(i_isolate));
   }

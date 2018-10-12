@@ -1,3 +1,4 @@
+// Flags: --expose-internals
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -22,9 +23,10 @@
 'use strict';
 require('../common');
 const assert = require('assert');
-const Process = process.binding('process_wrap').Process;
-const Pipe = process.binding('pipe_wrap').Pipe;
-const pipe = new Pipe();
+const { internalBinding } = require('internal/test/binding');
+const Process = internalBinding('process_wrap').Process;
+const { Pipe, constants: PipeConstants } = internalBinding('pipe_wrap');
+const pipe = new Pipe(PipeConstants.SOCKET);
 const p = new Process();
 
 let processExited = false;

@@ -4,14 +4,11 @@
 
 #if V8_TARGET_ARCH_ARM64
 
-#define ARM64_DEFINE_FP_STATICS
-
 #include "src/arm64/assembler-arm64-inl.h"
 #include "src/arm64/instructions-arm64.h"
 
 namespace v8 {
 namespace internal {
-
 
 bool Instruction::IsLoad() const {
   if (Mask(LoadStoreAnyFMask) != LoadStoreAnyFixed) {
@@ -73,7 +70,7 @@ bool Instruction::IsStore() const {
 static uint64_t RotateRight(uint64_t value,
                             unsigned int rotate,
                             unsigned int width) {
-  DCHECK(width <= 64);
+  DCHECK_LE(width, 64);
   rotate &= 63;
   return ((value & ((1UL << rotate) - 1UL)) << (width - rotate)) |
          (value >> rotate);
@@ -162,7 +159,7 @@ double Instruction::ImmNEONFP64() const {
 
 unsigned CalcLSDataSize(LoadStoreOp op) {
   DCHECK_EQ(static_cast<unsigned>(LSSize_offset + LSSize_width),
-            kInstructionSize * 8);
+            kInstrSize * 8);
   unsigned size = static_cast<Instr>(op) >> LSSize_offset;
   if ((op & LSVector_mask) != 0) {
     // Vector register memory operations encode the access size in the "size"
@@ -200,16 +197,16 @@ int64_t Instruction::ImmPCOffset() {
   } else if (BranchType() != UnknownBranchType) {
     // All PC-relative branches.
     // Relative branch offsets are instruction-size-aligned.
-    offset = ImmBranch() << kInstructionSizeLog2;
+    offset = ImmBranch() << kInstrSizeLog2;
   } else if (IsUnresolvedInternalReference()) {
     // Internal references are always word-aligned.
-    offset = ImmUnresolvedInternalReference() << kInstructionSizeLog2;
+    offset = ImmUnresolvedInternalReference() << kInstrSizeLog2;
   } else {
     // Load literal (offset from PC).
     DCHECK(IsLdrLiteral());
     // The offset is always shifted by 2 bits, even for loads to 64-bits
     // registers.
-    offset = ImmLLiteral() << kInstructionSizeLog2;
+    offset = ImmLLiteral() << kInstrSizeLog2;
   }
   return offset;
 }
@@ -230,21 +227,21 @@ bool Instruction::IsTargetInImmPCOffsetRange(Instruction* target) {
   return IsValidImmPCOffset(BranchType(), DistanceTo(target));
 }
 
-void Instruction::SetImmPCOffsetTarget(Assembler::IsolateData isolate_data,
+void Instruction::SetImmPCOffsetTarget(const AssemblerOptions& options,
                                        Instruction* target) {
   if (IsPCRelAddressing()) {
-    SetPCRelImmTarget(isolate_data, target);
+    SetPCRelImmTarget(options, target);
   } else if (BranchType() != UnknownBranchType) {
     SetBranchImmTarget(target);
   } else if (IsUnresolvedInternalReference()) {
-    SetUnresolvedInternalReferenceImmTarget(isolate_data, target);
+    SetUnresolvedInternalReferenceImmTarget(options, target);
   } else {
     // Load literal (offset from PC).
     SetImmLLiteral(target);
   }
 }
 
-void Instruction::SetPCRelImmTarget(Assembler::IsolateData isolate_data,
+void Instruction::SetPCRelImmTarget(const AssemblerOptions& options,
                                     Instruction* target) {
   // ADRP is not supported, so 'this' must point to an ADR instruction.
   DCHECK(IsAdr());
@@ -255,7 +252,7 @@ void Instruction::SetPCRelImmTarget(Assembler::IsolateData isolate_data,
     imm = Assembler::ImmPCRelAddress(static_cast<int>(target_offset));
     SetInstructionBits(Mask(~ImmPCRel_mask) | imm);
   } else {
-    PatchingAssembler patcher(isolate_data, reinterpret_cast<byte*>(this),
+    PatchingAssembler patcher(options, reinterpret_cast<byte*>(this),
                               PatchingAssembler::kAdrFarPatchableNInstrs);
     patcher.PatchAdrFar(target_offset);
   }
@@ -263,10 +260,10 @@ void Instruction::SetPCRelImmTarget(Assembler::IsolateData isolate_data,
 
 
 void Instruction::SetBranchImmTarget(Instruction* target) {
-  DCHECK(IsAligned(DistanceTo(target), kInstructionSize));
-  DCHECK(IsValidImmPCOffset(BranchType(),
-                            DistanceTo(target) >> kInstructionSizeLog2));
-  int offset = static_cast<int>(DistanceTo(target) >> kInstructionSizeLog2);
+  DCHECK(IsAligned(DistanceTo(target), kInstrSize));
+  DCHECK(
+      IsValidImmPCOffset(BranchType(), DistanceTo(target) >> kInstrSizeLog2));
+  int offset = static_cast<int>(DistanceTo(target) >> kInstrSizeLog2);
   Instr branch_imm = 0;
   uint32_t imm_mask = 0;
   switch (BranchType()) {
@@ -296,16 +293,16 @@ void Instruction::SetBranchImmTarget(Instruction* target) {
 }
 
 void Instruction::SetUnresolvedInternalReferenceImmTarget(
-    Assembler::IsolateData isolate_data, Instruction* target) {
+    const AssemblerOptions& options, Instruction* target) {
   DCHECK(IsUnresolvedInternalReference());
-  DCHECK(IsAligned(DistanceTo(target), kInstructionSize));
-  DCHECK(is_int32(DistanceTo(target) >> kInstructionSizeLog2));
+  DCHECK(IsAligned(DistanceTo(target), kInstrSize));
+  DCHECK(is_int32(DistanceTo(target) >> kInstrSizeLog2));
   int32_t target_offset =
-      static_cast<int32_t>(DistanceTo(target) >> kInstructionSizeLog2);
+      static_cast<int32_t>(DistanceTo(target) >> kInstrSizeLog2);
   uint32_t high16 = unsigned_bitextract_32(31, 16, target_offset);
   uint32_t low16 = unsigned_bitextract_32(15, 0, target_offset);
 
-  PatchingAssembler patcher(isolate_data, reinterpret_cast<byte*>(this), 2);
+  PatchingAssembler patcher(options, reinterpret_cast<byte*>(this), 2);
   patcher.brk(high16);
   patcher.brk(low16);
 }
@@ -313,7 +310,7 @@ void Instruction::SetUnresolvedInternalReferenceImmTarget(
 
 void Instruction::SetImmLLiteral(Instruction* source) {
   DCHECK(IsLdrLiteral());
-  DCHECK(IsAligned(DistanceTo(source), kInstructionSize));
+  DCHECK(IsAligned(DistanceTo(source), kInstrSize));
   DCHECK(Assembler::IsImmLLiteral(DistanceTo(source)));
   Instr imm = Assembler::ImmLLiteral(
       static_cast<int>(DistanceTo(source) >> kLoadLiteralScaleLog2));
@@ -660,8 +657,8 @@ void NEONFormatDecoder::SetFormatMaps(const NEONFormatMap* format0,
                                       const NEONFormatMap* format2) {
   DCHECK_NOT_NULL(format0);
   formats_[0] = format0;
-  formats_[1] = (format1 == NULL) ? formats_[0] : format1;
-  formats_[2] = (format2 == NULL) ? formats_[1] : format2;
+  formats_[1] = (format1 == nullptr) ? formats_[0] : format1;
+  formats_[2] = (format2 == nullptr) ? formats_[1] : format2;
 }
 
 void NEONFormatDecoder::SetFormatMap(unsigned index,

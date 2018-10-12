@@ -8,6 +8,7 @@
 #include "src/contexts.h"
 #include "src/objects.h"
 #include "src/objects/dictionary.h"
+#include "src/objects/js-array.h"
 
 namespace v8 {
 namespace internal {
@@ -22,7 +23,7 @@ class ConstructorBuiltins {
   // Maximum number of elements in copied array (chosen so that even an array
   // backed by a double backing store will fit into new-space).
   static const int kMaximumClonedShallowArrayElements =
-      JSArray::kInitialMaxFastElementArray * kPointerSize / kDoubleSize;
+      JSArray::kInitialMaxFastElementArray;
   // Maximum number of properties in copied object so that the properties store
   // will fit into new-space. This constant is based on the assumption that
   // NameDictionaries are 50% over-allocated.

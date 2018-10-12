@@ -49,6 +49,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArmUxtab:
     case kArmUxtah:
     case kArmRbit:
+    case kArmRev:
     case kArmAddPair:
     case kArmSubPair:
     case kArmMulPair:
@@ -212,6 +213,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArmI8x16GtU:
     case kArmI8x16GeU:
     case kArmS128Zero:
+    case kArmS128Dup:
     case kArmS128And:
     case kArmS128Or:
     case kArmS128Xor:
@@ -261,6 +263,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArmLdrh:
     case kArmLdrsh:
     case kArmLdr:
+    case kArmPeek:
+    case kArmWord32AtomicPairLoad:
       return kIsLoadOperation;
 
     case kArmVstrF32:
@@ -272,6 +276,36 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArmStr:
     case kArmPush:
     case kArmPoke:
+    case kArmDsbIsb:
+    case kArmWord32AtomicPairStore:
+    case kArmWord32AtomicPairAdd:
+    case kArmWord32AtomicPairSub:
+    case kArmWord32AtomicPairAnd:
+    case kArmWord32AtomicPairOr:
+    case kArmWord32AtomicPairXor:
+    case kArmWord32AtomicPairExchange:
+    case kArmWord32AtomicPairCompareExchange:
+    case kArmWord64AtomicNarrowAddUint8:
+    case kArmWord64AtomicNarrowAddUint16:
+    case kArmWord64AtomicNarrowAddUint32:
+    case kArmWord64AtomicNarrowSubUint8:
+    case kArmWord64AtomicNarrowSubUint16:
+    case kArmWord64AtomicNarrowSubUint32:
+    case kArmWord64AtomicNarrowAndUint8:
+    case kArmWord64AtomicNarrowAndUint16:
+    case kArmWord64AtomicNarrowAndUint32:
+    case kArmWord64AtomicNarrowOrUint8:
+    case kArmWord64AtomicNarrowOrUint16:
+    case kArmWord64AtomicNarrowOrUint32:
+    case kArmWord64AtomicNarrowXorUint8:
+    case kArmWord64AtomicNarrowXorUint16:
+    case kArmWord64AtomicNarrowXorUint32:
+    case kArmWord64AtomicNarrowExchangeUint8:
+    case kArmWord64AtomicNarrowExchangeUint16:
+    case kArmWord64AtomicNarrowExchangeUint32:
+    case kArmWord64AtomicNarrowCompareExchangeUint8:
+    case kArmWord64AtomicNarrowCompareExchangeUint16:
+    case kArmWord64AtomicNarrowCompareExchangeUint32:
       return kHasSideEffect;
 
 #define CASE(Name) case k##Name:

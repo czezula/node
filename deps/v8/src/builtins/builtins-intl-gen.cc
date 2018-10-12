@@ -6,16 +6,30 @@
 #error Internationalization is expected to be enabled.
 #endif  // V8_INTL_SUPPORT
 
+#include "src/builtins/builtins-iterator-gen.h"
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/code-stub-assembler.h"
+#include "src/objects-inl.h"
+#include "src/objects.h"
+#include "src/objects/js-list-format-inl.h"
+#include "src/objects/js-list-format.h"
 
 namespace v8 {
 namespace internal {
+
+template <class T>
+using TNode = compiler::TNode<T>;
 
 class IntlBuiltinsAssembler : public CodeStubAssembler {
  public:
   explicit IntlBuiltinsAssembler(compiler::CodeAssemblerState* state)
       : CodeStubAssembler(state) {}
+
+  void ListFormatCommon(TNode<Context> context, TNode<Int32T> argc,
+                        Runtime::FunctionId format_func_id,
+                        const char* method_name);
+
+  TNode<JSArray> AllocateEmptyJSArray(TNode<Context> context);
 };
 
 TF_BUILTIN(StringToLowerCaseIntl, IntlBuiltinsAssembler) {
@@ -27,8 +41,8 @@ TF_BUILTIN(StringToLowerCaseIntl, IntlBuiltinsAssembler) {
   Label call_c(this), return_string(this), runtime(this, Label::kDeferred);
 
   // Early exit on empty strings.
-  Node* const length = SmiUntag(LoadStringLength(string));
-  GotoIf(IntPtrEqual(length, IntPtrConstant(0)), &return_string);
+  TNode<Smi> const length = LoadStringLengthAsSmi(string);
+  GotoIf(SmiEqual(length, SmiConstant(0)), &return_string);
 
   // Unpack strings if possible, and bail to runtime unless we get a one-byte
   // flat string.
@@ -46,8 +60,7 @@ TF_BUILTIN(StringToLowerCaseIntl, IntlBuiltinsAssembler) {
   Node* const dst = AllocateSeqOneByteString(context, length);
 
   const int kMaxShortStringLength = 24;  // Determined empirically.
-  GotoIf(IntPtrGreaterThan(length, IntPtrConstant(kMaxShortStringLength)),
-         &call_c);
+  GotoIf(SmiGreaterThan(length, SmiConstant(kMaxShortStringLength)), &call_c);
 
   {
     Node* const dst_ptr = PointerToSeqStringData(dst);
@@ -55,10 +68,11 @@ TF_BUILTIN(StringToLowerCaseIntl, IntlBuiltinsAssembler) {
              IntPtrConstant(0));
 
     Node* const start_address = to_direct.PointerToData(&call_c);
-    Node* const end_address = IntPtrAdd(start_address, length);
+    TNode<IntPtrT> const end_address =
+        Signed(IntPtrAdd(start_address, SmiUntag(length)));
 
-    Node* const to_lower_table_addr = ExternalConstant(
-        ExternalReference::intl_to_latin1_lower_table(isolate()));
+    Node* const to_lower_table_addr =
+        ExternalConstant(ExternalReference::intl_to_latin1_lower_table());
 
     VARIABLE(var_did_change, MachineRepresentation::kWord32, Int32Constant(0));
 
@@ -75,7 +89,7 @@ TF_BUILTIN(StringToLowerCaseIntl, IntlBuiltinsAssembler) {
                     var_did_change.Bind(Word32Or(Word32NotEqual(c, lower),
                                                  var_did_change.value()));
 
-                    Increment(var_cursor);
+                    Increment(&var_cursor);
                   },
                   kCharSize, INTPTR_PARAMETERS, IndexAdvanceMode::kPost);
 
@@ -93,8 +107,8 @@ TF_BUILTIN(StringToLowerCaseIntl, IntlBuiltinsAssembler) {
   {
     Node* const src = to_direct.string();
 
-    Node* const function_addr = ExternalConstant(
-        ExternalReference::intl_convert_one_byte_to_lower(isolate()));
+    Node* const function_addr =
+        ExternalConstant(ExternalReference::intl_convert_one_byte_to_lower());
     Node* const isolate_ptr =
         ExternalConstant(ExternalReference::isolate_address(isolate()));
 
@@ -127,6 +141,72 @@ TF_BUILTIN(StringPrototypeToLowerCaseIntl, IntlBuiltinsAssembler) {
       ToThisString(context, maybe_string, "String.prototype.toLowerCase");
 
   Return(CallBuiltin(Builtins::kStringToLowerCaseIntl, context, string));
+}
+
+void IntlBuiltinsAssembler::ListFormatCommon(TNode<Context> context,
+                                             TNode<Int32T> argc,
+                                             Runtime::FunctionId format_func_id,
+                                             const char* method_name) {
+  CodeStubArguments args(this, ChangeInt32ToIntPtr(argc));
+
+  // Label has_list(this);
+  // 1. Let lf be this value.
+  // 2. If Type(lf) is not Object, throw a TypeError exception.
+  TNode<Object> receiver = args.GetReceiver();
+
+  // 3. If lf does not have an [[InitializedListFormat]] internal slot, throw a
+  // TypeError exception.
+  ThrowIfNotInstanceType(context, receiver, JS_INTL_LIST_FORMAT_TYPE,
+                         method_name);
+  TNode<JSListFormat> list_format = CAST(receiver);
+
+  // 4. If list is not provided or is undefined, then
+  TNode<Object> list = args.GetOptionalArgumentValue(0);
+  Label has_list(this);
+  {
+    GotoIfNot(IsUndefined(list), &has_list);
+    if (format_func_id == Runtime::kFormatList) {
+      // a. Return an empty String.
+      args.PopAndReturn(EmptyStringConstant());
+    } else {
+      DCHECK_EQ(format_func_id, Runtime::kFormatListToParts);
+      // a. Return an empty Array.
+      args.PopAndReturn(AllocateEmptyJSArray(context));
+    }
+  }
+  BIND(&has_list);
+  {
+    // 5. Let x be ? IterableToList(list).
+    IteratorBuiltinsAssembler iterator_assembler(state());
+    // TODO(adamk): Consider exposing IterableToList as a buitin and calling
+    // it from here instead of inlining the operation.
+    TNode<JSArray> x = iterator_assembler.IterableToList(context, list);
+
+    // 6. Return ? FormatList(lf, x).
+    args.PopAndReturn(CallRuntime(format_func_id, context, list_format, x));
+  }
+}
+
+TNode<JSArray> IntlBuiltinsAssembler::AllocateEmptyJSArray(
+    TNode<Context> context) {
+  return CAST(CodeStubAssembler::AllocateJSArray(
+      PACKED_ELEMENTS,
+      LoadJSArrayElementsMap(PACKED_ELEMENTS, LoadNativeContext(context)),
+      SmiConstant(0), SmiConstant(0)));
+}
+
+TF_BUILTIN(ListFormatPrototypeFormat, IntlBuiltinsAssembler) {
+  ListFormatCommon(
+      CAST(Parameter(Descriptor::kContext)),
+      UncheckedCast<Int32T>(Parameter(Descriptor::kJSActualArgumentsCount)),
+      Runtime::kFormatList, "Intl.ListFormat.prototype.format");
+}
+
+TF_BUILTIN(ListFormatPrototypeFormatToParts, IntlBuiltinsAssembler) {
+  ListFormatCommon(
+      CAST(Parameter(Descriptor::kContext)),
+      UncheckedCast<Int32T>(Parameter(Descriptor::kJSActualArgumentsCount)),
+      Runtime::kFormatListToParts, "Intl.ListFormat.prototype.formatToParts");
 }
 
 }  // namespace internal

@@ -44,6 +44,7 @@ bool OperatorProperties::HasFrameStateInput(const Operator* op) {
     case IrOpcode::kJSMultiply:
     case IrOpcode::kJSDivide:
     case IrOpcode::kJSModulus:
+    case IrOpcode::kJSExponentiate:
 
     // Bitwise operations
     case IrOpcode::kJSBitwiseOr:
@@ -70,9 +71,12 @@ bool OperatorProperties::HasFrameStateInput(const Operator* op) {
     case IrOpcode::kJSCreate:
     case IrOpcode::kJSCreateArguments:
     case IrOpcode::kJSCreateArray:
+    case IrOpcode::kJSCreateTypedArray:
     case IrOpcode::kJSCreateLiteralArray:
     case IrOpcode::kJSCreateLiteralObject:
     case IrOpcode::kJSCreateLiteralRegExp:
+    case IrOpcode::kJSCreateObject:
+    case IrOpcode::kJSCloneObject:
 
     // Property access operations
     case IrOpcode::kJSLoadNamed:
@@ -85,17 +89,16 @@ bool OperatorProperties::HasFrameStateInput(const Operator* op) {
     case IrOpcode::kJSStoreDataPropertyInLiteral:
     case IrOpcode::kJSDeleteProperty:
 
-    // Context operations
-    case IrOpcode::kJSCreateScriptContext:
-
     // Conversions
     case IrOpcode::kJSToInteger:
     case IrOpcode::kJSToLength:
     case IrOpcode::kJSToName:
     case IrOpcode::kJSToNumber:
+    case IrOpcode::kJSToNumberConvertBigInt:
+    case IrOpcode::kJSToNumeric:
     case IrOpcode::kJSToObject:
     case IrOpcode::kJSToString:
-    case IrOpcode::kJSToPrimitiveToString:
+    case IrOpcode::kJSParseInt:
 
     // Call operations
     case IrOpcode::kJSConstructForwardVarargs:
@@ -108,12 +111,21 @@ bool OperatorProperties::HasFrameStateInput(const Operator* op) {
     case IrOpcode::kJSCallWithSpread:
 
     // Misc operations
-    case IrOpcode::kJSStringConcat:
+    case IrOpcode::kJSForInEnumerate:
     case IrOpcode::kJSForInNext:
-    case IrOpcode::kJSForInPrepare:
     case IrOpcode::kJSStackCheck:
     case IrOpcode::kJSDebugger:
     case IrOpcode::kJSGetSuperConstructor:
+    case IrOpcode::kJSBitwiseNot:
+    case IrOpcode::kJSDecrement:
+    case IrOpcode::kJSIncrement:
+    case IrOpcode::kJSNegate:
+    case IrOpcode::kJSPromiseResolve:
+    case IrOpcode::kJSRejectPromise:
+    case IrOpcode::kJSResolvePromise:
+    case IrOpcode::kJSPerformPromiseThen:
+    case IrOpcode::kJSObjectIsArray:
+    case IrOpcode::kJSRegExpTest:
       return true;
 
     default:

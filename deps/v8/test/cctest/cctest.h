@@ -31,8 +31,12 @@
 #include <memory>
 
 #include "include/libplatform/libplatform.h"
+#include "include/v8-platform.h"
 #include "src/debug/debug-interface.h"
 #include "src/flags.h"
+#include "src/heap/factory.h"
+#include "src/isolate.h"
+#include "src/objects.h"
 #include "src/utils.h"
 #include "src/v8.h"
 #include "src/zone/accounting-allocator.h"
@@ -110,7 +114,7 @@ class CcTest {
   bool enabled() { return enabled_; }
 
   static v8::Isolate* isolate() {
-    CHECK(isolate_ != NULL);
+    CHECK_NOT_NULL(isolate_);
     v8::base::Relaxed_Store(&isolate_used_, 1);
     return isolate_;
   }
@@ -237,12 +241,11 @@ class ApiTestFuzzer: public v8::base::Thread {
   RegisterThreadedTest register_##Name(Test##Name, #Name);           \
   /* */ TEST(Name)
 
-
 class RegisterThreadedTest {
  public:
   explicit RegisterThreadedTest(CcTest::TestFunction* callback,
                                 const char* name)
-      : fuzzer_(NULL), callback_(callback), name_(name) {
+      : fuzzer_(nullptr), callback_(callback), name_(name) {
     prev_ = first_;
     first_ = this;
     count_++;
@@ -315,6 +318,17 @@ static inline uint16_t* AsciiToTwoByteString(const char* source) {
   return converted;
 }
 
+template <typename T>
+static inline i::Handle<T> GetGlobal(const char* name) {
+  i::Isolate* isolate = CcTest::i_isolate();
+  i::Handle<i::String> str_name =
+      isolate->factory()->InternalizeUtf8String(name);
+
+  i::Handle<i::Object> value =
+      i::Object::GetProperty(isolate, isolate->global_object(), str_name)
+          .ToHandleChecked();
+  return i::Handle<T>::cast(value);
+}
 
 static inline v8::Local<v8::Value> v8_num(double x) {
   return v8::Number::New(v8::Isolate::GetCurrent(), x);
@@ -438,25 +452,6 @@ static inline v8::Local<v8::Value> CompileRun(
 }
 
 
-static inline v8::Local<v8::Value> ParserCacheCompileRun(const char* source) {
-  // Compile once just to get the preparse data, then compile the second time
-  // using the data.
-  v8::Isolate* isolate = v8::Isolate::GetCurrent();
-  v8::Local<v8::Context> context = isolate->GetCurrentContext();
-  v8::ScriptCompiler::Source script_source(v8_str(source));
-  v8::ScriptCompiler::Compile(context, &script_source,
-                              v8::ScriptCompiler::kProduceParserCache)
-      .ToLocalChecked();
-
-  // Check whether we received cached data, and if so use it.
-  v8::ScriptCompiler::CompileOptions options =
-      script_source.GetCachedData() ? v8::ScriptCompiler::kConsumeParserCache
-                                    : v8::ScriptCompiler::kNoCompileOptions;
-
-  return CompileRun(context, &script_source, options);
-}
-
-
 // Helper functions that compile and run the source with given origin.
 static inline v8::Local<v8::Value> CompileRunWithOrigin(const char* source,
                                                         const char* origin_url,
@@ -494,7 +489,7 @@ static inline v8::Local<v8::Value> CompileRunWithOrigin(
 static inline void ExpectString(const char* code, const char* expected) {
   v8::Local<v8::Value> result = CompileRun(code);
   CHECK(result->IsString());
-  v8::String::Utf8Value utf8(result);
+  v8::String::Utf8Value utf8(v8::Isolate::GetCurrent(), result);
   CHECK_EQ(0, strcmp(expected, *utf8));
 }
 
@@ -617,21 +612,111 @@ class ManualGCScope {
   ManualGCScope()
       : flag_concurrent_marking_(i::FLAG_concurrent_marking),
         flag_concurrent_sweeping_(i::FLAG_concurrent_sweeping),
-        flag_stress_incremental_marking_(i::FLAG_stress_incremental_marking) {
+        flag_stress_incremental_marking_(i::FLAG_stress_incremental_marking),
+        flag_parallel_marking_(i::FLAG_parallel_marking),
+        flag_detect_ineffective_gcs_near_heap_limit_(
+            i::FLAG_detect_ineffective_gcs_near_heap_limit) {
     i::FLAG_concurrent_marking = false;
     i::FLAG_concurrent_sweeping = false;
     i::FLAG_stress_incremental_marking = false;
+    // Parallel marking has a dependency on concurrent marking.
+    i::FLAG_parallel_marking = false;
+    i::FLAG_detect_ineffective_gcs_near_heap_limit = false;
   }
   ~ManualGCScope() {
     i::FLAG_concurrent_marking = flag_concurrent_marking_;
     i::FLAG_concurrent_sweeping = flag_concurrent_sweeping_;
     i::FLAG_stress_incremental_marking = flag_stress_incremental_marking_;
+    i::FLAG_parallel_marking = flag_parallel_marking_;
+    i::FLAG_detect_ineffective_gcs_near_heap_limit =
+        flag_detect_ineffective_gcs_near_heap_limit_;
   }
 
  private:
   bool flag_concurrent_marking_;
   bool flag_concurrent_sweeping_;
   bool flag_stress_incremental_marking_;
+  bool flag_parallel_marking_;
+  bool flag_detect_ineffective_gcs_near_heap_limit_;
+};
+
+// This is an abstract base class that can be overridden to implement a test
+// platform. It delegates all operations to a given platform at the time
+// of construction.
+class TestPlatform : public v8::Platform {
+ public:
+  // v8::Platform implementation.
+  v8::PageAllocator* GetPageAllocator() override {
+    return old_platform_->GetPageAllocator();
+  }
+
+  void OnCriticalMemoryPressure() override {
+    old_platform_->OnCriticalMemoryPressure();
+  }
+
+  bool OnCriticalMemoryPressure(size_t length) override {
+    return old_platform_->OnCriticalMemoryPressure(length);
+  }
+
+  int NumberOfWorkerThreads() override {
+    return old_platform_->NumberOfWorkerThreads();
+  }
+
+  std::shared_ptr<v8::TaskRunner> GetForegroundTaskRunner(
+      v8::Isolate* isolate) override {
+    return old_platform_->GetForegroundTaskRunner(isolate);
+  }
+
+  void CallOnWorkerThread(std::unique_ptr<v8::Task> task) override {
+    old_platform_->CallOnWorkerThread(std::move(task));
+  }
+
+  void CallDelayedOnWorkerThread(std::unique_ptr<v8::Task> task,
+                                 double delay_in_seconds) override {
+    old_platform_->CallDelayedOnWorkerThread(std::move(task), delay_in_seconds);
+  }
+
+  void CallOnForegroundThread(v8::Isolate* isolate, v8::Task* task) override {
+    old_platform_->CallOnForegroundThread(isolate, task);
+  }
+
+  void CallDelayedOnForegroundThread(v8::Isolate* isolate, v8::Task* task,
+                                     double delay_in_seconds) override {
+    old_platform_->CallDelayedOnForegroundThread(isolate, task,
+                                                 delay_in_seconds);
+  }
+
+  double MonotonicallyIncreasingTime() override {
+    return old_platform_->MonotonicallyIncreasingTime();
+  }
+
+  double CurrentClockTimeMillis() override {
+    return old_platform_->CurrentClockTimeMillis();
+  }
+
+  void CallIdleOnForegroundThread(v8::Isolate* isolate,
+                                  v8::IdleTask* task) override {
+    old_platform_->CallIdleOnForegroundThread(isolate, task);
+  }
+
+  bool IdleTasksEnabled(v8::Isolate* isolate) override {
+    return old_platform_->IdleTasksEnabled(isolate);
+  }
+
+  v8::TracingController* GetTracingController() override {
+    return old_platform_->GetTracingController();
+  }
+
+ protected:
+  TestPlatform() : old_platform_(i::V8::GetCurrentPlatform()) {}
+  ~TestPlatform() { i::V8::SetPlatformForTesting(old_platform_); }
+
+  v8::Platform* old_platform() const { return old_platform_; }
+
+ private:
+  v8::Platform* old_platform_;
+
+  DISALLOW_COPY_AND_ASSIGN(TestPlatform);
 };
 
 #endif  // ifndef CCTEST_H_

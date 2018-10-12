@@ -12,30 +12,23 @@ const bench = common.createBenchmark(main, {
   len: [102400, 1024 * 1024 * 16],
   type: ['utf', 'asc', 'buf'],
   dur: [5]
+}, {
+  flags: [ '--expose-internals', '--no-warnings' ]
 });
 
-const TCP = process.binding('tcp_wrap').TCP;
-const TCPConnectWrap = process.binding('tcp_wrap').TCPConnectWrap;
-const WriteWrap = process.binding('stream_wrap').WriteWrap;
-const PORT = common.PORT;
+function main({ dur, len, type }) {
+  const { internalBinding } = require('internal/test/binding');
+  const { TCP, constants: TCPConstants } = process.binding('tcp_wrap');
+  const { TCPConnectWrap } = process.binding('tcp_wrap');
+  const { WriteWrap } = internalBinding('stream_wrap');
+  const PORT = common.PORT;
 
-var dur;
-var len;
-var type;
+  function fail(err, syscall) {
+    throw util._errnoException(err, syscall);
+  }
 
-function main(conf) {
-  dur = +conf.dur;
-  len = +conf.len;
-  type = conf.type;
-  server();
-}
-
-function fail(err, syscall) {
-  throw util._errnoException(err, syscall);
-}
-
-function server() {
-  const serverHandle = new TCP();
+  // Server
+  const serverHandle = new TCP(TCPConstants.SERVER);
   var err = serverHandle.bind('127.0.0.1', PORT);
   if (err)
     fail(err, 'bind');
@@ -61,7 +54,7 @@ function server() {
       if (err)
         fail(err, 'write');
 
-      writeReq.oncomplete = function(status, handle, req, err) {
+      writeReq.oncomplete = function(status, handle, err) {
         if (err)
           fail(err, 'write');
       };
@@ -70,10 +63,7 @@ function server() {
     clientHandle.readStart();
   };
 
-  client();
-}
-
-function client() {
+  // Client
   var chunk;
   switch (type) {
     case 'buf':
@@ -89,11 +79,11 @@ function client() {
       throw new Error(`invalid type: ${type}`);
   }
 
-  const clientHandle = new TCP();
+  const clientHandle = new TCP(TCPConstants.SOCKET);
   const connectReq = new TCPConnectWrap();
-  const err = clientHandle.connect(connectReq, '127.0.0.1', PORT);
   var bytes = 0;
 
+  err = clientHandle.connect(connectReq, '127.0.0.1', PORT);
   if (err)
     fail(err, 'connect');
 
@@ -143,7 +133,7 @@ function client() {
       fail(err, 'write');
   }
 
-  function afterWrite(err, handle, req) {
+  function afterWrite(err, handle) {
     if (err)
       fail(err, 'write');
 

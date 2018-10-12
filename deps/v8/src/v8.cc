@@ -5,7 +5,6 @@
 #include "src/v8.h"
 
 #include "src/api.h"
-#include "src/assembler.h"
 #include "src/base/atomicops.h"
 #include "src/base/once.h"
 #include "src/base/platform/platform.h"
@@ -14,14 +13,18 @@
 #include "src/deoptimizer.h"
 #include "src/elements.h"
 #include "src/frames.h"
+#include "src/interface-descriptors.h"
 #include "src/isolate.h"
 #include "src/libsampler/sampler.h"
 #include "src/objects-inl.h"
 #include "src/profiler/heap-profiler.h"
+#include "src/reloc-info.h"
 #include "src/runtime-profiler.h"
+#include "src/simulator.h"
 #include "src/snapshot/natives.h"
 #include "src/snapshot/snapshot.h"
 #include "src/tracing/tracing-category-observer.h"
+#include "src/wasm/wasm-engine.h"
 
 namespace v8 {
 namespace internal {
@@ -33,8 +36,7 @@ V8_DECLARE_ONCE(init_natives_once);
 V8_DECLARE_ONCE(init_snapshot_once);
 #endif
 
-v8::Platform* V8::platform_ = NULL;
-
+v8::Platform* V8::platform_ = nullptr;
 
 bool V8::Initialize() {
   InitializeOncePerProcess();
@@ -43,10 +45,14 @@ bool V8::Initialize() {
 
 
 void V8::TearDown() {
+#if defined(USE_SIMULATOR)
+  Simulator::GlobalTearDown();
+#endif
+  wasm::WasmEngine::GlobalTearDown();
+  CallDescriptors::TearDown();
   Bootstrapper::TearDownExtensions();
   ElementsAccessor::TearDown();
   RegisteredExtension::UnregisterAll();
-  Isolate::GlobalTearDown();
   sampler::Sampler::TearDown();
   FlagList::ResetAllFlags();  // Frees memory held by string arguments.
 }
@@ -66,16 +72,21 @@ void V8::InitializeOncePerProcessImpl() {
     FLAG_max_semi_space_size = 1;
   }
 
-  base::OS::Initialize(FLAG_random_seed, FLAG_hard_abort, FLAG_gc_fake_mmap);
+  base::OS::Initialize(FLAG_hard_abort, FLAG_gc_fake_mmap);
+
+  if (FLAG_random_seed) SetRandomMmapSeed(FLAG_random_seed);
 
   Isolate::InitializeOncePerProcess();
 
+#if defined(USE_SIMULATOR)
+  Simulator::InitializeOncePerProcess();
+#endif
   sampler::Sampler::SetUp();
   CpuFeatures::Probe(false);
   ElementsAccessor::InitializeOncePerProcess();
-  SetUpJSCallerSavedCodeData();
-  ExternalReference::SetUp();
   Bootstrapper::InitializeOncePerProcess();
+  CallDescriptors::InitializeOncePerProcess();
+  wasm::WasmEngine::InitializeOncePerProcess();
 }
 
 
@@ -97,7 +108,7 @@ void V8::ShutdownPlatform() {
   CHECK(platform_);
   v8::tracing::TracingCategoryObserver::TearDown();
   v8::base::SetPrintStackTrace(nullptr);
-  platform_ = NULL;
+  platform_ = nullptr;
 }
 
 
@@ -117,7 +128,7 @@ void V8::SetNativesBlob(StartupData* natives_blob) {
 #ifdef V8_USE_EXTERNAL_STARTUP_DATA
   base::CallOnce(&init_natives_once, &SetNativesFromFile, natives_blob);
 #else
-  CHECK(false);
+  UNREACHABLE();
 #endif
 }
 
@@ -126,8 +137,13 @@ void V8::SetSnapshotBlob(StartupData* snapshot_blob) {
 #ifdef V8_USE_EXTERNAL_STARTUP_DATA
   base::CallOnce(&init_snapshot_once, &SetSnapshotFromFile, snapshot_blob);
 #else
-  CHECK(false);
+  UNREACHABLE();
 #endif
 }
 }  // namespace internal
+
+// static
+double Platform::SystemClockTimeMillis() {
+  return base::OS::TimeCurrentMillis();
+}
 }  // namespace v8

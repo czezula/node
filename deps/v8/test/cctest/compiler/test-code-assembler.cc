@@ -4,6 +4,8 @@
 
 #include "src/code-factory.h"
 #include "src/compiler/code-assembler.h"
+#include "src/compiler/node-properties.h"
+#include "src/compiler/opcodes.h"
 #include "src/isolate.h"
 #include "src/objects-inl.h"
 #include "test/cctest/compiler/code-assembler-tester.h"
@@ -31,7 +33,7 @@ Node* UndefinedConstant(CodeAssembler& m) {
   return m.LoadRoot(Heap::kUndefinedValueRootIndex);
 }
 
-Node* SmiFromWord32(CodeAssembler& m, Node* value) {
+Node* SmiFromInt32(CodeAssembler& m, Node* value) {
   value = m.ChangeInt32ToIntPtr(value);
   return m.BitcastWordToTaggedSigned(
       m.WordShl(value, kSmiShiftSize + kSmiTagSize));
@@ -85,9 +87,10 @@ TEST(SimpleCallRuntime1Arg) {
   CodeAssembler m(asm_tester.state());
   Node* context = m.HeapConstant(Handle<Context>(isolate->native_context()));
   Node* b = SmiTag(m, m.Int32Constant(0));
-  m.Return(m.CallRuntime(Runtime::kNumberToSmi, context, b));
+  m.Return(m.CallRuntime(Runtime::kIsSmi, context, b));
   FunctionTester ft(asm_tester.GenerateCode());
-  CHECK_EQ(0, ft.CallChecked<Smi>()->value());
+  CHECK(ft.CallChecked<Oddball>().is_identical_to(
+      isolate->factory()->true_value()));
 }
 
 TEST(SimpleTailCallRuntime1Arg) {
@@ -96,9 +99,10 @@ TEST(SimpleTailCallRuntime1Arg) {
   CodeAssembler m(asm_tester.state());
   Node* context = m.HeapConstant(Handle<Context>(isolate->native_context()));
   Node* b = SmiTag(m, m.Int32Constant(0));
-  m.TailCallRuntime(Runtime::kNumberToSmi, context, b);
+  m.TailCallRuntime(Runtime::kIsSmi, context, b);
   FunctionTester ft(asm_tester.GenerateCode());
-  CHECK_EQ(0, ft.CallChecked<Smi>()->value());
+  CHECK(ft.CallChecked<Oddball>().is_identical_to(
+      isolate->factory()->true_value()));
 }
 
 TEST(SimpleCallRuntime2Arg) {
@@ -289,7 +293,7 @@ TEST(VariableMergeBindFirst) {
   m.Goto(&merge);
   m.Bind(&merge);
   CHECK(var1.value() != temp);
-  CHECK(var1.value() != nullptr);
+  CHECK_NOT_NULL(var1.value());
   m.Goto(&end);
   m.Bind(&l2);
   Node* temp2 = m.Int32Constant(2);
@@ -298,7 +302,7 @@ TEST(VariableMergeBindFirst) {
   m.Goto(&merge);
   m.Bind(&end);
   CHECK(var1.value() != temp);
-  CHECK(var1.value() != nullptr);
+  CHECK_NOT_NULL(var1.value());
 }
 
 TEST(VariableMergeSwitch) {
@@ -309,18 +313,23 @@ TEST(VariableMergeSwitch) {
   Label l1(&m), l2(&m), default_label(&m);
   Label* labels[] = {&l1, &l2};
   int32_t values[] = {1, 2};
-  Node* temp = m.Int32Constant(0);
-  var1.Bind(temp);
+  Node* temp1 = m.Int32Constant(0);
+  var1.Bind(temp1);
   m.Switch(m.Int32Constant(2), &default_label, values, labels, 2);
   m.Bind(&l1);
-  DCHECK_EQ(temp, var1.value());
-  m.Return(temp);
+  CHECK_EQ(temp1, var1.value());
+  m.Return(temp1);
   m.Bind(&l2);
-  DCHECK_EQ(temp, var1.value());
-  m.Return(temp);
+  CHECK_EQ(temp1, var1.value());
+  Node* temp2 = m.Int32Constant(7);
+  var1.Bind(temp2);
+  m.Goto(&default_label);
   m.Bind(&default_label);
-  DCHECK_EQ(temp, var1.value());
-  m.Return(temp);
+  CHECK_EQ(IrOpcode::kPhi, var1.value()->opcode());
+  CHECK_EQ(2, var1.value()->op()->ValueInputCount());
+  CHECK_EQ(temp1, NodeProperties::GetValueInput(var1.value(), 0));
+  CHECK_EQ(temp2, NodeProperties::GetValueInput(var1.value(), 1));
+  m.Return(temp1);
 }
 
 TEST(SplitEdgeBranchMerge) {
@@ -410,12 +419,15 @@ TEST(TestOutOfScopeVariable) {
   Label block2(&m);
   Label block3(&m);
   Label block4(&m);
-  m.Branch(m.WordEqual(m.Parameter(0), m.IntPtrConstant(0)), &block1, &block4);
+  m.Branch(m.WordEqual(m.UncheckedCast<IntPtrT>(m.Parameter(0)),
+                       m.IntPtrConstant(0)),
+           &block1, &block4);
   m.Bind(&block4);
   {
     Variable var_object(&m, MachineRepresentation::kTagged);
-    m.Branch(m.WordEqual(m.Parameter(0), m.IntPtrConstant(0)), &block2,
-             &block3);
+    m.Branch(m.WordEqual(m.UncheckedCast<IntPtrT>(m.Parameter(0)),
+                         m.IntPtrConstant(0)),
+             &block2, &block3);
 
     m.Bind(&block2);
     var_object.Bind(m.IntPtrConstant(55));
@@ -457,7 +469,7 @@ TEST(GotoIfException) {
   CHECK(result->IsJSObject());
 
   Handle<Object> constructor =
-      Object::GetPropertyOrElement(result,
+      Object::GetPropertyOrElement(isolate, result,
                                    isolate->factory()->constructor_string())
           .ToHandleChecked();
   CHECK(constructor->SameValue(*isolate->type_error_function()));
@@ -495,7 +507,7 @@ TEST(GotoIfExceptionMultiple) {
   error.Bind(UndefinedConstant(m));
   string = m.CallStub(to_string, context, second_value);
   m.GotoIfException(string, &exception_handler2, &error);
-  m.Return(SmiFromWord32(m, return_value.value()));
+  m.Return(SmiFromInt32(m, return_value.value()));
 
   // try { ToString(param3); return 7 & ~2; } catch (e) { return e; }
   m.Bind(&exception_handler2);
@@ -503,7 +515,7 @@ TEST(GotoIfExceptionMultiple) {
   error.Bind(UndefinedConstant(m));
   string = m.CallStub(to_string, context, third_value);
   m.GotoIfException(string, &exception_handler3, &error);
-  m.Return(SmiFromWord32(
+  m.Return(SmiFromInt32(
       m, m.Word32And(return_value.value(),
                      m.Word32Xor(m.Int32Constant(2), m.Int32Constant(-1)))));
 
@@ -542,7 +554,7 @@ TEST(GotoIfExceptionMultiple) {
   CHECK(result->IsJSObject());
 
   Handle<Object> constructor =
-      Object::GetPropertyOrElement(result,
+      Object::GetPropertyOrElement(isolate, result,
                                    isolate->factory()->constructor_string())
           .ToHandleChecked();
   CHECK(constructor->SameValue(*isolate->type_error_function()));

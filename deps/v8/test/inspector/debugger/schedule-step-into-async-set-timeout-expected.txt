@@ -5,7 +5,7 @@ paused at:
 debugger; #setTimeout(() => 1, 0);
 
 paused at:
-debugger; setTimeout(#() => 1, 0);
+debugger; setTimeout(() => #1, 0);
 
 
 Running test: testDebuggerStmtBeforeCallback1
@@ -21,7 +21,8 @@ paused at:
 
 Running test: testDebuggerStmtBeforeCallback2
 paused at:
-debugger; setTimeout(() => 1#, 0);debugger;
+setTimeout('debugger//should-break-here', 0);
+#setTimeout(() => 1, 0);
 
 paused at:
 #debugger//should-break-here
@@ -41,5 +42,5 @@ paused at:
 #setTimeout(() => 42, 0)
 
 paused at:
-setTimeout(#() => 42, 0)
+setTimeout(() => #42, 0)
 

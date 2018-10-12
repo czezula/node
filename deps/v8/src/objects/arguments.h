@@ -6,6 +6,7 @@
 #define V8_OBJECTS_ARGUMENTS_H_
 
 #include "src/objects.h"
+#include "src/objects/fixed-array.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -14,15 +15,16 @@ namespace v8 {
 namespace internal {
 
 // Common superclass for JSSloppyArgumentsObject and JSStrictArgumentsObject.
+// Note that the instance type {JS_ARGUMENTS_TYPE} does _not_ guarantee the
+// below layout, the in-object properties might have transitioned to dictionary
+// mode already. Only use the below layout with the specific initial maps.
 class JSArgumentsObject : public JSObject {
  public:
   // Offsets of object fields.
   static const int kLengthOffset = JSObject::kHeaderSize;
-  static const int kHeaderSize = kLengthOffset + kPointerSize;
+  static const int kSize = kLengthOffset + kPointerSize;
   // Indices of in-object properties.
   static const int kLengthIndex = 0;
-
-  DECL_ACCESSORS(length, Object)
 
   DECL_VERIFIER(JSArgumentsObject)
   DECL_CAST(JSArgumentsObject)
@@ -36,15 +38,14 @@ class JSArgumentsObject : public JSObject {
 class JSSloppyArgumentsObject : public JSArgumentsObject {
  public:
   // Offsets of object fields.
-  static const int kCalleeOffset = JSArgumentsObject::kHeaderSize;
+  static const int kCalleeOffset = JSArgumentsObject::kSize;
   static const int kSize = kCalleeOffset + kPointerSize;
   // Indices of in-object properties.
   static const int kCalleeIndex = kLengthIndex + 1;
 
-  DECL_ACCESSORS(callee, Object)
-
-  DECL_VERIFIER(JSSloppyArgumentsObject)
-  DECL_CAST(JSSloppyArgumentsObject)
+  inline static bool GetSloppyArgumentsLength(Isolate* isolate,
+                                              Handle<JSObject> object,
+                                              int* out);
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(JSSloppyArgumentsObject);
@@ -55,9 +56,7 @@ class JSSloppyArgumentsObject : public JSArgumentsObject {
 class JSStrictArgumentsObject : public JSArgumentsObject {
  public:
   // Offsets of object fields.
-  static const int kSize = JSArgumentsObject::kHeaderSize;
-
-  DECL_CAST(JSStrictArgumentsObject)
+  static const int kSize = JSArgumentsObject::kSize;
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(JSStrictArgumentsObject);
@@ -100,7 +99,7 @@ class SloppyArgumentsElements : public FixedArray {
 
   DECL_CAST(SloppyArgumentsElements)
 #ifdef VERIFY_HEAP
-  void SloppyArgumentsElementsVerify(JSSloppyArgumentsObject* holder);
+  void SloppyArgumentsElementsVerify(Isolate* isolate, JSObject* holder);
 #endif
 
  private:

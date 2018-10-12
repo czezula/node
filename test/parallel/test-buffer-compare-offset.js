@@ -57,7 +57,7 @@ assert.strictEqual(1, a.compare(b, Infinity, -Infinity));
 // zero length target because default for targetEnd <= targetSource
 assert.strictEqual(1, a.compare(b, '0xff'));
 
-const oor = common.expectsError({ code: 'ERR_INDEX_OUT_OF_RANGE' }, 7);
+const oor = common.expectsError({ code: 'ERR_OUT_OF_RANGE' }, 7);
 
 assert.throws(() => a.compare(b, 0, 100, 0), oor);
 assert.throws(() => a.compare(b, 0, 1, 0, 100), oor);
@@ -66,9 +66,9 @@ assert.throws(() => a.compare(b, 0, '0xff'), oor);
 assert.throws(() => a.compare(b, 0, Infinity), oor);
 assert.throws(() => a.compare(b, 0, 1, -1), oor);
 assert.throws(() => a.compare(b, -Infinity, Infinity), oor);
-assert.throws(() => a.compare(), common.expectsError({
+common.expectsError(() => a.compare(), {
   code: 'ERR_INVALID_ARG_TYPE',
   type: TypeError,
   message: 'The "target" argument must be one of ' +
-           'type buffer or uint8Array. Received type undefined'
-}));
+           'type Buffer or Uint8Array. Received type undefined'
+});

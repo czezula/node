@@ -9,7 +9,6 @@
 #include "src/inspector/string-util.h"
 #include "src/inspector/v8-console.h"
 #include "src/inspector/v8-inspector-impl.h"
-#include "src/inspector/v8-value-copier.h"
 
 #include "include/v8-inspector.h"
 
@@ -111,11 +110,11 @@ InjectedScript* InspectedContext::getInjectedScript(int sessionId) {
 }
 
 bool InspectedContext::createInjectedScript(int sessionId) {
-  DCHECK(m_injectedScripts.find(sessionId) == m_injectedScripts.end());
   std::unique_ptr<InjectedScript> injectedScript =
       InjectedScript::create(this, sessionId);
   // InjectedScript::create can destroy |this|.
   if (!injectedScript) return false;
+  CHECK(m_injectedScripts.find(sessionId) == m_injectedScripts.end());
   m_injectedScripts[sessionId] = std::move(injectedScript);
   return true;
 }

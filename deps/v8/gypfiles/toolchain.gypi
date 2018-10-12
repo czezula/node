@@ -32,6 +32,7 @@
     'msvs_use_common_release': 0,
     'clang%': 0,
     'asan%': 0,
+    'cfi_vptr%': 0,
     'lsan%': 0,
     'msan%': 0,
     'tsan%': 0,
@@ -56,6 +57,9 @@
 
     # Similar to the ARM hard float ABI but on MIPS.
     'v8_use_mips_abi_hardfloat%': 'true',
+
+    # MIPS MSA support
+    'mips_use_msa%': 0,
 
     # Print to stdout on Android.
     'v8_android_log_stdout%': 0,
@@ -438,6 +442,9 @@
                     'cflags': ['-mips32r6'],
                     'ldflags': ['-mips32r6'],
                   }],
+                  ['mips_arch_variant=="r6" and mips_use_msa==1', {
+                    'defines': [ '_MIPS_MSA' ],
+                  }],
                   ['mips_arch_variant=="r2"', {
                     'conditions': [
                       [ 'mips_fpu_mode=="fp64"', {
@@ -506,6 +513,9 @@
                       'FPU_MODE_FP64',
                     ],
                   }],
+                  ['mips_arch_variant=="r6" and mips_use_msa==1', {
+                    'defines': [ '_MIPS_MSA' ],
+                  }],
                   ['mips_arch_variant=="r2"', {
                     'conditions': [
                       [ 'mips_fpu_mode=="fp64"', {
@@ -556,6 +566,9 @@
                   '_MIPS_ARCH_MIPS32R6',
                   'FPU_MODE_FP64',
                 ],
+              }],
+              ['mips_arch_variant=="r6" and mips_use_msa==1', {
+                'defines': [ '_MIPS_MSA' ],
               }],
               ['mips_arch_variant=="r2"', {
                 'conditions': [
@@ -639,6 +652,9 @@
                     'cflags': ['-mips32r6'],
                     'ldflags': ['-mips32r6'],
                   }],
+                  ['mips_arch_variant=="r6" and mips_use_msa==1', {
+                    'defines': [ '_MIPS_MSA' ],
+                  }],
                   ['mips_arch_variant=="r2"', {
                     'conditions': [
                       [ 'mips_fpu_mode=="fp64"', {
@@ -720,6 +736,9 @@
                       'FPU_MODE_FP64',
                     ],
                   }],
+                  ['mips_arch_variant=="r6" and mips_use_msa==1', {
+                    'defines': [ '_MIPS_MSA' ],
+                  }],
                   ['mips_arch_variant=="r2"', {
                     'conditions': [
                       [ 'mips_fpu_mode=="fp64"', {
@@ -776,6 +795,9 @@
                   '_MIPS_ARCH_MIPS32R6',
                   'FPU_MODE_FP64',
                 ],
+              }],
+              ['mips_arch_variant=="r6" and mips_use_msa==1', {
+                'defines': [ '_MIPS_MSA' ],
               }],
               ['mips_arch_variant=="r2"', {
                 'conditions': [
@@ -876,6 +898,9 @@
                     'cflags': ['-mips64r6', '-mabi=64'],
                     'ldflags': ['-mips64r6', '-mabi=64'],
                   }],
+                  ['mips_arch_variant=="r6" and mips_use_msa==1', {
+                    'defines': [ '_MIPS_MSA' ],
+                  }],
                   ['mips_arch_variant=="r2"', {
                     'defines': ['_MIPS_ARCH_MIPS64R2',],
                     'conditions': [
@@ -894,6 +919,9 @@
                   ['mips_arch_variant=="r6"', {
                     'defines': ['_MIPS_ARCH_MIPS64R6',],
                   }],
+                  ['mips_arch_variant=="r6" and mips_use_msa==1', {
+                    'defines': [ '_MIPS_MSA' ],
+                  }],
                   ['mips_arch_variant=="r2"', {
                     'defines': ['_MIPS_ARCH_MIPS64R2',],
                   }],
@@ -905,6 +933,9 @@
             'conditions': [
               ['mips_arch_variant=="r6"', {
                 'defines': ['_MIPS_ARCH_MIPS64R6',],
+              }],
+              ['mips_arch_variant=="r6" and mips_use_msa==1', {
+                'defines': [ '_MIPS_MSA' ],
               }],
               ['mips_arch_variant=="r2"', {
                 'defines': ['_MIPS_ARCH_MIPS64R2',],
@@ -1096,7 +1127,7 @@
             'ldflags': [ '-Wl,-bmaxdata:0x60000000/dsa' ],
           }],
           [ 'v8_target_arch=="ppc64"', {
-            'cflags': [ '-maix64' ],
+            'cflags': [ '-maix64', '-fdollars-in-identifiers' ],
             'ldflags': [ '-maix64 -Wl,-bbigtoc' ],
           }],
         ],
@@ -1224,7 +1255,9 @@
           'OBJECT_PRINT',
           'VERIFY_HEAP',
           'DEBUG',
-          'V8_TRACE_MAPS'
+          'V8_TRACE_MAPS',
+          'V8_ENABLE_ALLOCATION_TIMEOUT',
+          'V8_ENABLE_FORCE_SLOW_PATH',
         ],
         'conditions': [
           ['OS=="linux" or OS=="freebsd" or OS=="openbsd" or OS=="netbsd" or \
@@ -1392,5 +1425,24 @@
         }],
       ],
     },  # configurations
+    'msvs_disabled_warnings': [
+      4245,  # Conversion with signed/unsigned mismatch.
+      4267,  # Conversion with possible loss of data.
+      4324,  # Padding structure due to alignment.
+      4701,  # Potentially uninitialized local variable.
+      4702,  # Unreachable code.
+      4703,  # Potentially uninitialized local pointer variable.
+      4709,  # Comma operator within array index expr (bugged).
+      4714,  # Function marked forceinline not inlined.
+
+      # MSVC assumes that control can get past an exhaustive switch and then
+      # warns if there's no return there (see https://crbug.com/v8/7658)
+      4715,  # Not all control paths return a value.
+
+      4718,  # Recursive call has no side-effect.
+      4723,  # https://crbug.com/v8/7771
+      4724,  # https://crbug.com/v8/7771
+      4800,  # Forcing value to bool.
+    ],
   },  # target_defaults
 }

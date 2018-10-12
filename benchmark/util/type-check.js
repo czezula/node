@@ -29,18 +29,21 @@ const bench = common.createBenchmark(main, {
   type: Object.keys(args),
   version: ['native', 'js'],
   argument: ['true', 'false-primitive', 'false-object'],
-  millions: ['5']
+  n: [1e5]
 }, {
   flags: ['--expose-internals']
 });
 
-function main(conf) {
-  const util = process.binding('util');
+function main({ type, argument, version, n }) {
+  // For testing, if supplied with an empty type, default to ArrayBufferView.
+  type = type || 'ArrayBufferView';
+
+  const { internalBinding } = require('internal/test/binding');
+  const util = internalBinding('util');
   const types = require('internal/util/types');
 
-  const n = (+conf.millions * 1e6) | 0;
-  const func = { native: util, js: types }[conf.version][`is${conf.type}`];
-  const arg = args[conf.type][conf.argument];
+  const func = { native: util, js: types }[version][`is${type}`];
+  const arg = args[type][argument];
 
   bench.start();
   for (var i = 0; i < n; i++) {
